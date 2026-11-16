@@ -151,6 +151,8 @@ const LAUNCHER_TEMPLATE := [
 ]
 
 var log_callback: Callable
+## Set from another thread to stop a running build (the export is killed).
+var cancel_requested := false
 var warnings := 0
 var errors := 0
 
@@ -176,7 +178,7 @@ static func default_settings(project_dir: String) -> Dictionary:
 		"screenshot": "res://portmaster/screenshot.png",
 		"cover": "",
 		"licenses": "res://portmaster/licenses",
-		"output": project_dir.get_base_dir().path_join("PortMaster"),
+		"output": "../PortMaster",  # relative to the project, so port.cfg works on any machine
 		"controls": {},
 		"labels": {},
 	}
@@ -244,6 +246,19 @@ static func check_port_name(port: String) -> String:
 		return "Port name must be lowercase a-z, 0-9, '.' or '_' and start with a letter or digit."
 	if port.contains(".."):
 		return "Port name must not contain '..' (PortMaster collapses repeated dots)."
+	return ""
+
+
+## The title names the launcher file (<Title>.sh), so it must be a valid filename
+## on Windows, Linux and the FAT/exFAT SD cards handhelds use.
+static func check_title(title: String) -> String:
+	if title.is_empty():
+		return "Title is empty."
+	for c in title:
+		if c in "\\/:*?\"<>|" or c.unicode_at(0) < 32:
+			return "Title can't contain \\ / : * ? \" < > | (it becomes the launcher's filename, '%s.sh')." % title
+	if title.ends_with(".") or title.ends_with(" ") or title.begins_with(" "):
+		return "Title can't start with a space or end with a space or '.' (it becomes the launcher's filename)."
 	return ""
 
 
@@ -427,9 +442,11 @@ static func generate_controls(project_dir: String, overrides: Dictionary = {}, l
 			for other in info.keys():
 				if info[other]["keys"].has(best) and not info[other]["sources"].has(src):
 					hit.append(other)
-		if hit.size() > 0 and not bound.any(func(a): return info[a]["project"]):
+		var directional: bool = src in ["up", "down", "left", "right"] or src.contains("_analog_")
+		if hit.size() > 0 and not directional and not bound.any(func(a): return info[a]["project"]):
 			# Only Godot's defaults use this button (e.g. ui_select = Y + Space), and the
 			# key would also fire other actions (Space -> ui_accept). Leave it unmapped.
+			# Never for the d-pad or sticks: games often bind the arrows to their own actions.
 			notes.append("%s left unmapped: only %s uses it, and %s would also trigger %s." % [src, ", ".join(bound), best, ", ".join(hit)])
 			continue
 		auto[src] = best
@@ -461,6 +478,19 @@ static func generate_controls(project_dir: String, overrides: Dictionary = {}, l
 		var label: String = str(labels.get(b, auto_label))
 		rows.append({"button": b, "key": key, "auto_key": auto_key,
 			"actions": PackedStringArray(acts), "label": label, "auto_label": auto_label})
+
+	# On the device only gptokeyb's keys reach the game, so a keyboard-only action
+	# is unusable unless some button sends one of its keys.
+	var sent := PackedStringArray()
+	for r in rows:
+		if not str(r["key"]).is_empty():
+			sent.append(r["key"])
+	for name in info.keys():
+		var keys: PackedStringArray = info[name]["keys"]
+		if not info[name]["project"] or keys.is_empty() or not info[name]["sources"].is_empty():
+			continue
+		if not Array(keys).any(func(k): return sent.has(k)):
+			problems.append("'%s' has no gamepad button, and no button sends its keys (%s). Set a button to one of them in the controls table, or it can't be used on the device." % [name, ", ".join(keys)])
 	return {"rows": rows, "problems": problems, "notes": notes}
 
 
@@ -503,8 +533,9 @@ func build(project_dir: String, s: Dictionary) -> bool:
 	var name_problem := check_port_name(port)
 	if not name_problem.is_empty():
 		return _fail(name_problem)
-	if title.is_empty() or title.contains("/"):
-		return _fail("Title must be set and must not contain '/'.")
+	var title_problem := check_title(title)
+	if not title_problem.is_empty():
+		return _fail(title_problem)
 	if str(s.get("porter", "")).strip_edges().is_empty():
 		return _fail("Porter must be set (your name or handle, as PortMaster should credit you).")
 	if str(s.get("developer", "")).strip_edges().is_empty():
@@ -523,7 +554,6 @@ func build(project_dir: String, s: Dictionary) -> bool:
 	var game_dir := out_root.path_join(port)
 	var gamedata := game_dir.path_join("gamedata")
 	DirAccess.make_dir_recursive_absolute(gamedata)
-	_clean_old_output(out_root, game_dir, port)
 
 	var ver := _godot_version(str(s.get("godot_runtime", "")))
 	if ver.is_empty():
@@ -533,10 +563,11 @@ func build(project_dir: String, s: Dictionary) -> bool:
 	if not ensure_preset(project_dir):
 		return false
 
-	# 2. Export the pck
+	# 2. Export the pck. Nothing from an earlier build is touched until this succeeds.
 	var pck := gamedata.path_join(port + ".pck")
 	if not export_pck(project_dir, pck):
 		return false
+	_clean_old_output(out_root, game_dir, port)
 
 	# 3. Renderer override, next to the pck (loaded from the main pack's folder)
 	_write(gamedata.path_join("override.cfg"),
@@ -561,19 +592,19 @@ func build(project_dir: String, s: Dictionary) -> bool:
 	_write(out_root.path_join(script_name), launcher)
 	_say("Wrote %s (runtime godot_%s)." % [script_name, ver])
 
-	# 6. Metadata
-	var genres := _genres(str(s.get("genres", "")))
-	_write(out_root.path_join("port.json"), port_json_text(s, port, title, ver, genres))
-	_write(out_root.path_join("gameinfo.xml"), gameinfo_text(s, title, genres))
-	_write(out_root.path_join("README.md"), readme_text(s, title, controls["rows"]))
-	_say("Wrote port.json, gameinfo.xml and README.md.")
-
-	# 7. Screenshot, cover, licences
-	_copy_image(resolve_path(str(s.get("screenshot", "")), project_dir), out_root, "screenshot", true)
+	# 6. Screenshot, cover, licences (before the metadata, which names the screenshot)
+	var shot_name := _copy_image(resolve_path(str(s.get("screenshot", "")), project_dir), out_root, "screenshot", true)
 	var cover := resolve_path(str(s.get("cover", "")), project_dir)
 	if not cover.is_empty():
 		_copy_image(cover, out_root, "cover", false)
 	_copy_licenses(resolve_path(str(s.get("licenses", "")), project_dir), game_dir.path_join("licenses"))
+
+	# 7. Metadata
+	var genres := _genres(str(s.get("genres", "")))
+	_write(out_root.path_join("port.json"), port_json_text(s, port, title, ver, genres))
+	_write(out_root.path_join("gameinfo.xml"), gameinfo_text(s, title, genres, shot_name if not shot_name.is_empty() else "screenshot.png"))
+	_write(out_root.path_join("README.md"), readme_text(s, title, controls["rows"]))
+	_say("Wrote port.json, gameinfo.xml and README.md.")
 
 	# 8. Checks
 	run_checks(out_root, port, script_name)
@@ -712,6 +743,15 @@ func _clean_old_output(out_root: String, game_dir: String, port: String) -> void
 
 # ---------------------------------------------------------------- preset
 
+## Preset fields always set by this addon, never copied from the model preset.
+## Encryption and patches must stay off: PortMaster's stock runtime can't read an
+## encrypted pck, and a patch pck is useless on its own.
+const OWN_PRESET_KEYS := [
+	"name", "platform", "runnable", "exclude_filter", "export_path", "patches",
+	"encrypt_pck", "encrypt_directory", "encryption_include_filters", "encryption_exclude_filters",
+]
+
+
 func ensure_preset(project_dir: String) -> bool:
 	var path := project_dir.path_join("export_presets.cfg")
 	var cf := ConfigFile.new()
@@ -744,7 +784,7 @@ func ensure_preset(project_dir: String) -> bool:
 		# Same field set and order as the project's own preset; only our values differ.
 		var copied := {}
 		for key in cf.get_section_keys(model):
-			copied[key] = top[key] if top.has(key) and key in ["name", "platform", "runnable", "exclude_filter", "export_path"] else cf.get_value(model, key)
+			copied[key] = top[key] if top.has(key) and key in OWN_PRESET_KEYS else cf.get_value(model, key)
 		for key in top.keys():
 			if not copied.has(key):
 				copied[key] = top[key]
@@ -789,6 +829,8 @@ func _check_preset(cf: ConfigFile, sec: String) -> void:
 		_warn("Preset '%s' is not a Linux preset." % PRESET_NAME)
 	if str(cf.get_value(o, "binary_format/architecture", "")) != "arm64":
 		_warn("Preset '%s' is not arm64; most handhelds need arm64." % PRESET_NAME)
+	if bool(cf.get_value(sec, "encrypt_pck", false)):
+		_warn("Preset '%s' encrypts the pck; PortMaster's Godot runtime can't open an encrypted pck. Turn encryption off in that preset." % PRESET_NAME)
 	if not bool(cf.get_value(o, "texture_format/etc2_astc", false)):
 		_warn("Preset '%s' has ETC2/ASTC off; GLES3 handhelds need it for VRAM-compressed textures." % PRESET_NAME)
 	_say("Using existing export preset '%s'." % PRESET_NAME)
@@ -796,23 +838,32 @@ func _check_preset(cf: ConfigFile, sec: String) -> void:
 
 # ---------------------------------------------------------------- export
 
+## Exports to a temporary file and only replaces `pck` when the export succeeds,
+## so a failed build leaves the previous port intact. Runs Godot as a child
+## process that `cancel_requested` can stop (e.g. when the editor closes).
 func export_pck(project_dir: String, pck: String) -> bool:
-	if FileAccess.file_exists(pck):
-		DirAccess.remove_absolute(pck)
+	var tmp := pck.get_basename() + ".building.pck"
+	if FileAccess.file_exists(tmp):
+		DirAccess.remove_absolute(tmp)
 	var godot := OS.get_executable_path()
 	var log_path := OS.get_cache_dir().path_join("portmaster_export_%d.log" % Time.get_ticks_usec())
 	var args := PackedStringArray(["--headless", "--path", project_dir,
-		"--log-file", log_path, "--export-pack", PRESET_NAME, pck])
+		"--log-file", log_path, "--export-pack", PRESET_NAME, tmp])
 	_say("Exporting pck: %s %s" % [godot.get_file(), " ".join(args)])
-	var output := []
-	var code := OS.execute(godot, args, output, true, false)
+	var pid := OS.create_process(godot, args, false)
+	if pid <= 0:
+		return _fail("Couldn't start %s for the export." % godot)
+	while OS.is_process_running(pid):
+		if cancel_requested:
+			OS.kill(pid)
+			if FileAccess.file_exists(tmp):
+				DirAccess.remove_absolute(tmp)
+			return _fail("Build cancelled; the previous port was left as it was.")
+		OS.delay_msec(100)
+	var code := OS.get_process_exit_code(pid)
 	var text := ""
-	for chunk in output:
-		text += str(chunk)
 	if FileAccess.file_exists(log_path):
-		var lt := FileAccess.get_file_as_string(log_path)
-		if lt.length() > text.length():
-			text = lt
+		text = FileAccess.get_file_as_string(log_path)
 		DirAccess.remove_absolute(log_path)
 	# Keep errors and warnings (with their "at:" line); drop the per-file progress.
 	var interesting := PackedStringArray()
@@ -829,10 +880,16 @@ func export_pck(project_dir: String, pck: String) -> bool:
 			keep_next = false
 	if interesting.size() > 0:
 		_say("  export output:\n" + "\n".join(interesting.slice(0, 40)))
-	if code != 0:
-		return _fail("Export failed (exit code %d). See the export output above." % code)
-	if not FileAccess.file_exists(pck):
-		return _fail("Export finished but %s is missing." % pck)
+	if code != 0 or not FileAccess.file_exists(tmp):
+		if FileAccess.file_exists(tmp):
+			DirAccess.remove_absolute(tmp)
+		if code != 0:
+			return _fail("Export failed (exit code %d). See the export output above; the previous port was left as it was." % code)
+		return _fail("Export finished but wrote no pck; the previous port was left as it was.")
+	if FileAccess.file_exists(pck):
+		DirAccess.remove_absolute(pck)
+	if DirAccess.rename_absolute(tmp, pck) != OK:
+		return _fail("Couldn't move the new pck into place at %s." % pck)
 	var size := FileAccess.open(pck, FileAccess.READ).get_length()
 	_say("Exported %s (%.1f MB)." % [pck.get_file(), size / 1048576.0])
 	return true
@@ -866,13 +923,9 @@ func port_json_text(s: Dictionary, port: String, title: String, ver: String, gen
 		if not p.strip_edges().is_empty():
 			porters.append(p.strip_edges())
 	var store := []
-	var url := str(s.get("itch_url", "")).strip_edges()
+	var url := str(s.get("itch_url", "")).strip_edges()  # key kept for older port.cfg files; any store URL
 	if not url.is_empty():
-		var dev_url := url
-		var m := RegEx.create_from_string("^(https?://[^/]+\\.itch\\.io/)").search(url)
-		if m:
-			dev_url = m.get_string(1)
-		store.append({"name": "itch", "gameurl": url, "developerurl": dev_url})
+		store.append(store_entry(url))
 	var attr := {
 		"title": title,
 		"porter": Array(porters),
@@ -901,7 +954,20 @@ func port_json_text(s: Dictionary, port: String, title: String, ver: String, gen
 	return JSON.stringify(data, "  ", false) + "\n"
 
 
-func gameinfo_text(s: Dictionary, title: String, genres: PackedStringArray) -> String:
+## port.json store entry for a game URL, named after the site as merged ports do.
+## itch.io pages also get the developer's itch page as developerurl.
+static func store_entry(url: String) -> Dictionary:
+	var m := RegEx.create_from_string("^https?://([^/]+)").search(url)
+	var host := m.get_string(1).to_lower() if m else ""
+	if host.ends_with(".itch.io"):
+		return {"name": "itch", "gameurl": url, "developerurl": "https://%s/" % host}
+	var known := {"store.steampowered.com": "Steam", "www.gog.com": "GOG", "gog.com": "GOG",
+		"github.com": "GitHub", "gamejolt.com": "Gamejolt", "play.google.com": "Play Store"}
+	var store_name: String = known.get(host, host.trim_prefix("www."))
+	return {"name": store_name, "gameurl": url, "developerurl": ""}
+
+
+func gameinfo_text(s: Dictionary, title: String, genres: PackedStringArray, shot_name: String = "screenshot.png") -> String:
 	var date := str(s.get("release_date", "")).strip_edges().replace("-", "")
 	if date.length() != 8:
 		var t := Time.get_date_dict_from_system()
@@ -921,11 +987,11 @@ func gameinfo_text(s: Dictionary, title: String, genres: PackedStringArray) -> S
     <developer>%s</developer>
     <publisher>%s</publisher>
     <genre>%s</genre>
-    <image>./%s/screenshot.png</image>
+    <image>./%s/%s</image>
   </game>
 </gameList>
 """ % [_xml(title), _xml(title), _xml(str(s.get("description", "")).strip_edges()), date,
-		_xml(dev), _xml(dev), _xml(genre), port]
+		_xml(dev), _xml(dev), _xml(genre), port, shot_name]
 
 
 func readme_text(s: Dictionary, title: String, rows: Array) -> String:
@@ -990,15 +1056,17 @@ func _genres(text: String) -> PackedStringArray:
 
 # ---------------------------------------------------------------- images & licences
 
-func _copy_image(src: String, out_root: String, base: String, required: bool) -> void:
+## Copies (and for the screenshot, scales) an image into the port root.
+## Returns the written file name, or "" when nothing was written.
+func _copy_image(src: String, out_root: String, base: String, required: bool) -> String:
 	if src.is_empty() or not FileAccess.file_exists(src):
 		if required:
 			_warn("No screenshot at '%s'. PortMaster needs a 640x480 screenshot.png (a 1280x960 grab is scaled down)." % src)
-		return
+		return ""
 	var img := Image.load_from_file(src)
 	if img == null or img.is_empty():
 		_warn("Can't read image %s." % src)
-		return
+		return ""
 	var w := img.get_width()
 	var h := img.get_height()
 	var ext := src.get_extension().to_lower()
@@ -1022,6 +1090,12 @@ func _copy_image(src: String, out_root: String, base: String, required: bool) ->
 		else:
 			img.save_png(dest)
 		_say("Wrote %s." % dest.get_file())
+	return dest.get_file()
+
+
+## True for UTF-8 text with no NUL bytes (licence .txt/.md files, or a bare LICENSE).
+static func _is_text(bytes: PackedByteArray) -> bool:
+	return not bytes.has(0) and bytes.get_string_from_utf8().to_utf8_buffer() == bytes
 
 
 func _copy_licenses(src: String, dest: String) -> void:
@@ -1034,7 +1108,16 @@ func _copy_licenses(src: String, dest: String) -> void:
 	for f in d.get_files():
 		if f.begins_with(".") or f.ends_with(".import") or f.ends_with(".uid"):
 			continue
-		DirAccess.copy_absolute(src.path_join(f), dest.path_join(f))
+		var bytes := FileAccess.get_file_as_bytes(src.path_join(f))
+		if _is_text(bytes) and bytes.has(13):
+			# Licences saved on Windows often have CRLF; PortMaster wants LF.
+			var out := FileAccess.open(dest.path_join(f), FileAccess.WRITE)
+			if out:
+				out.store_buffer(bytes.get_string_from_utf8().replace("\r\n", "\n").replace("\r", "\n").to_utf8_buffer())
+				out.close()
+			_say("  %s: converted CRLF line endings to LF." % f)
+		else:
+			DirAccess.copy_absolute(src.path_join(f), dest.path_join(f))
 		n += 1
 	for sub in d.get_directories():
 		_warn("Licences subfolder '%s' skipped; licenses/ must be flat." % sub)

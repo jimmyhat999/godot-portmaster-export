@@ -12,7 +12,7 @@ const FIELDS := [
 	["developer", "Developer", "line"],
 	["description", "Description", "text"],
 	["genres", "Genres", "line"],
-	["itch_url", "itch URL", "line"],
+	["itch_url", "Store URL", "line"],
 	["credits", "README credits", "text"],
 	["release_date", "Release date", "line"],
 	["godot_runtime", "Godot runtime", "line"],
@@ -26,6 +26,7 @@ const HINTS := {
 	"port_name": "Lowercase a-z, 0-9, '.' and '_'; unique in PortMaster's catalogue.",
 	"genres": "Comma-separated PortMaster genres: action, adventure, arcade, casino/card, fps, platformer, puzzle, racing, rhythm, rpg, simulation, sports, strategy, visual novel, other.",
 	"credits": "One or two sentences for the README, e.g. 'Music by X (link).'",
+	"itch_url": "The game's page: itch.io, Steam, GOG, GitHub... Goes into port.json's store entry.",
 	"release_date": "YYYYMMDD for gameinfo.xml; empty uses the build date.",
 	"godot_runtime": "Blank = match this editor (a patch release like 4.7.2 uses PortMaster's 4.7.1). Set e.g. 4.8 only if PortMaster has a runtime this addon doesn't know.",
 	"screenshot": "640x480, or an exact multiple of 320x240 (scaled down nearest-neighbour).",
@@ -46,6 +47,7 @@ var big_dialog: ConfirmationDialog
 var big_edit: TextEdit
 var big_target: TextEdit
 var thread: Thread
+var builder: RefCounted  # the running build, so closing the editor can cancel it
 
 
 func _ready() -> void:
@@ -58,6 +60,8 @@ func _ready() -> void:
 
 func _exit_tree() -> void:
 	if thread and thread.is_started():
+		if builder:
+			builder.cancel_requested = true  # kills the export so the editor isn't held up
 		thread.wait_to_finish()
 
 
@@ -255,23 +259,43 @@ func _save() -> void:
 func _on_build() -> void:
 	if thread and thread.is_started():
 		return
-	_save()
 	log_box.text = ""
+	# The export runs in a separate Godot that reads the project from disk.
+	EditorInterface.save_all_scenes()
+	var unsaved := _unsaved_scripts()
+	if not unsaved.is_empty():
+		_log("These scripts have unsaved changes, which the export wouldn't include:\n  %s\nSave them (File > Save All in the script editor), then build again." % "\n  ".join(unsaved))
+		return
+	_save()
 	build_button.disabled = true
 	build_button.text = "Building..."
+	builder = Builder.new()
+	builder.log_callback = func(msg: String): _log.call_deferred(msg)
 	thread = Thread.new()
 	thread.start(_run_build.bind(settings.duplicate(true)))
 
 
+## Open scripts whose text in the editor differs from the file on disk.
+func _unsaved_scripts() -> PackedStringArray:
+	var out := PackedStringArray()
+	for script in EditorInterface.get_script_editor().get_open_scripts():
+		var path: String = script.resource_path
+		if path.is_empty() or path.contains("::") or not FileAccess.file_exists(path):
+			continue
+		var on_disk := FileAccess.get_file_as_string(path).replace("\r", "")
+		if script.source_code.replace("\r", "") != on_disk:
+			out.append(path)
+	return out
+
+
 func _run_build(s: Dictionary) -> void:
-	var b := Builder.new()
-	b.log_callback = func(msg: String): _log.call_deferred(msg)
-	var ok := b.build(project_dir, s)
+	var ok: bool = builder.build(project_dir, s)
 	_build_finished.call_deferred(ok)
 
 
 func _build_finished(ok: bool) -> void:
 	thread.wait_to_finish()
+	builder = null
 	build_button.disabled = false
 	build_button.text = "Build port"
 	_log("Build %s." % ("succeeded" if ok else "FAILED"))

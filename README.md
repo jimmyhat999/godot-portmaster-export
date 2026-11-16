@@ -45,14 +45,17 @@ One press of **Build port**:
 ## Use
 
 1. **Fill in the dock:** port name (lowercase, unique in PortMaster's
-   catalogue), title, porter, developer, description, genres, store URL and
-   README credits. Long fields have an **Edit** button for a larger editor.
+   catalogue), title (it also names the launcher file), porter, developer,
+   description, genres, store URL (itch.io, Steam, GOG...) and README credits. Long fields have an **Edit** button for a larger editor.
 2. **Add a screenshot** at the screenshot path: 640x480, or a 1280x960 grab.
 3. **Add licences:** one file per third-party asset (fonts, music, art) in the
    licences folder, by default `res://portmaster/licenses/`.
 4. **Check the controls table.** Change a key to override it, clear it to unmap
    the button, and fill in the Action column for the README.
-5. **Press Build port.** The build log shows each step and the checks.
+5. **Press Build port.** It saves your open scenes first. It won't start while
+   an open script has unsaved changes, because the export reads files from
+   disk. The build log shows each step and the checks. If a build fails or you
+   close the editor mid-build, the previous port is left as it was.
 
 Settings are saved in `res://portmaster/port.cfg`. The `res://portmaster/`
 folder gets a `.gdignore`, so Godot doesn't import the screenshot or licences
@@ -107,7 +110,11 @@ plugin:
   don't also trigger other actions;
 - leaves the button unmapped when only Godot's built-in actions use it and its
   key would trigger something else;
-- points the left stick at the d-pad's keys.
+- points the left stick at the d-pad's keys;
+- warns about any of your actions that has keyboard keys but no gamepad button
+  sending one of them. Those actions can't be used on the device until you set
+  a button for them in the controls table, which is typical for keyboard-only
+  games.
 
 PortMaster names face buttons by their printed letter (Nintendo layout), so A
 is the right-hand button on most devices. The README tells Knulli users to
