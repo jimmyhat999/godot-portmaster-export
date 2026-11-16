@@ -1,0 +1,12 @@
+; Test project for the PortMaster Export addon. Not part of the download.
+
+config_version=5
+
+[application]
+
+config/name="PortMaster Export"
+config/features=PackedStringArray("4.5")
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/portmaster_export/plugin.cfg")

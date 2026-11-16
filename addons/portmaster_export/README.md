@@ -1,0 +1,129 @@
+# PortMaster Export
+
+A Godot 4 editor plugin that packages your game as a
+[PortMaster](https://portmaster.games/) port for Linux handhelds, ready to copy
+to an SD card or submit to the PortMaster catalogue.
+
+It leaves your game alone. The Compatibility renderer, the gamepad mapping and
+the launcher live only in the port it builds.
+
+## What it builds
+
+One press of **Build port**:
+1. **Exports the game** as a `.pck`, which PortMaster's shared Godot runtime
+   runs, through an export preset it adds for you.
+2. **Switches the renderer** to Compatibility (GLES3) for the port only, with an
+   `override.cfg` beside the pck. Your project keeps its own renderer.
+3. **Maps the controls.** It generates the gptokeyb mapping (`.gptk`) from your
+   Input Map: each gamepad button sends a keyboard key its action already uses.
+   You can override any button in the dock.
+4. **Writes the launcher**, PortMaster's standard Godot launcher with your
+   paths and the right Godot runtime filled in.
+5. **Writes the catalogue files:** `port.json`, `gameinfo.xml` and a README
+   with a controls table.
+6. **Copies art and licences.** The screenshot is scaled to 640x480 when it's a
+   multiple of 320x240, and licences go into a flat `licenses/` folder.
+7. **Checks the result** against PortMaster's rules: name, screenshot size,
+   required files, file sizes, line endings and encoding.
+
+## Requirements
+
+- **Godot 4.5 or newer.** Tested on 4.5 and 4.7.2.
+- **GDScript projects.** C# projects need PortMaster's Mono runtime, which
+  this plugin doesn't support yet.
+- **No export templates.** The plugin only exports a pck, so you don't need
+  them.
+
+## Install
+
+1. Copy `addons/portmaster_export/` into your project's `addons/` folder, or
+   install it from the Asset Library.
+2. In Project > Project Settings > Plugins, enable **PortMaster Export**.
+3. A **PortMaster** tab appears in the top-right panel, next to Inspector.
+   If you can't see it, use the arrows at the end of the tab row.
+
+## Use
+
+1. **Fill in the dock:** port name (lowercase, unique in PortMaster's
+   catalogue), title, porter, developer, description, genres, store URL and
+   README credits. Long fields have an **Edit** button for a larger editor.
+2. **Add a screenshot** at the screenshot path: 640x480, or a 1280x960 grab.
+3. **Add licences:** one file per third-party asset (fonts, music, art) in the
+   licences folder, by default `res://portmaster/licenses/`.
+4. **Check the controls table.** Change a key to override it, clear it to unmap
+   the button, and fill in the Action column for the README.
+5. **Press Build port.** The build log shows each step and the checks.
+
+Settings are saved in `res://portmaster/port.cfg`. The `res://portmaster/`
+folder gets a `.gdignore`, so Godot doesn't import the screenshot or licences
+and they never end up in your game.
+
+The first build adds a "PortMaster" export preset (Linux, arm64, pck only,
+ETC2/ASTC) to `export_presets.cfg`. Restart the editor to see it in
+Project > Export. Restart before opening that dialog, or the editor may save
+over the new preset.
+
+## Output
+
+The port goes to `<output>/<port>/`. By default that's
+`<project>/../PortMaster/<port>/`, outside your project.
+
+```
+<port>/
+  <Title>.sh              launcher
+  port.json  gameinfo.xml  README.md  screenshot.png  [cover.png]
+  <port>/
+    <port>.gptk           gamepad -> keyboard mapping
+    gamedata/<port>.pck
+    gamedata/override.cfg Compatibility renderer
+    licenses/
+```
+
+- **Play it:** copy the `<port>/` folder into the ports folder on your
+  device's SD card.
+- **Submit it:** copy the folder into `ports/` in a clone of
+  [PortMaster-New](https://github.com/PortsMaster/PortMaster-New), run
+  `python tools/build_release.py --do-check`, then follow PortMaster's
+  testing and pull-request process.
+
+## Godot runtimes
+
+PortMaster runs your pck on its shared Godot runtime, which must match your
+editor version. On each build the plugin reads PortMaster's current runtime
+list, falling back to a built-in copy when offline. It then picks:
+- **An exact match** when there is one, e.g. `godot_4.5`.
+- **Otherwise, the newest runtime in your editor's series,** e.g. a 4.7.2 editor
+  uses `godot_4.7.1`. Godot only rejects a pck from a newer *minor* version, so
+  this works, but the log reminds you to test on a device.
+- **If there's none for your series,** the build stops. You can force a
+  runtime with the dock's **Godot runtime** field.
+
+## Controls
+
+The game's gamepad support is switched off on the device, and gptokeyb turns
+button presses into keyboard keys instead. For each gamepad button, the
+plugin:
+- picks a key that the button's actions already use, preferring keys that
+  don't also trigger other actions;
+- leaves the button unmapped when only Godot's built-in actions use it and its
+  key would trigger something else;
+- points the left stick at the d-pad's keys.
+
+PortMaster names face buttons by their printed letter (Nintendo layout), so A
+is the right-hand button on most devices. The README tells Knulli users to
+turn on the A/B X/Y swap option.
+
+## Headless use
+
+`builder.gd` also runs without the editor:
+
+```gdscript
+var B = load("res://addons/portmaster_export/builder.gd")
+var builder = B.new()
+builder.build(project_dir, B.load_settings(project_dir))
+```
+
+## Licence
+
+MIT, see `LICENSE`. The launcher template is PortMaster's, also MIT; see
+`THIRD_PARTY_NOTICES.md`.

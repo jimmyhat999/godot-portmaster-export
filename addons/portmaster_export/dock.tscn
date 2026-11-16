@@ -1,0 +1,7 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://addons/portmaster_export/dock.gd" id="1_dock"]
+
+[node name="PortMaster" type="VBoxContainer"]
+custom_minimum_size = Vector2(0, 400)
+script = ExtResource("1_dock")
