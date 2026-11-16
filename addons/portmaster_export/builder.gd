@@ -158,6 +158,11 @@ static var _runtimes_failed_at := -1
 const RUNTIMES_RETRY_MS := 5 * 60 * 1000
 var warnings := 0
 var errors := 0
+## Things the catalogue needs that a device test doesn't (e.g. the screenshot).
+var submit_todo := PackedStringArray()
+## generate_controls() result computed by the caller on the main thread; when
+## empty, build() computes it itself.
+var precomputed_controls := {}
 
 
 # ---------------------------------------------------------------- settings
@@ -446,11 +451,9 @@ static func generate_controls(project_dir: String, overrides: Dictionary = {}, l
 		for i in candidates.size():
 			var k := candidates[i]
 			var penalty := 0
-			var also := PackedStringArray()
 			for other in info.keys():
 				if info[other]["keys"].has(k) and not info[other]["sources"].has(src):
 					penalty += 10 if info[other]["project"] else 1
-					also.append(other)
 			var coverage := 0
 			for a in bound:
 				if info[a]["keys"].has(k):
@@ -550,6 +553,7 @@ static func gptk_text(rows: Array) -> String:
 func build(project_dir: String, s: Dictionary) -> bool:
 	warnings = 0
 	errors = 0
+	submit_todo.clear()
 	project_dir = project_dir.replace("\\", "/").simplify_path()
 	var port: String = str(s.get("port_name", "")).strip_edges()
 	var title: String = str(s.get("title", "")).strip_edges()
@@ -581,7 +585,6 @@ func build(project_dir: String, s: Dictionary) -> bool:
 	out_root = out_root.path_join(port)
 	var game_dir := out_root.path_join(port)
 	var gamedata := game_dir.path_join("gamedata")
-	DirAccess.make_dir_recursive_absolute(gamedata)
 
 	var ver := _godot_version(str(s.get("godot_runtime", "")))
 	if ver.is_empty():
@@ -593,9 +596,15 @@ func build(project_dir: String, s: Dictionary) -> bool:
 	if not ensure_preset(project_dir):
 		return false
 
-	# 2. Export the pck. Nothing from an earlier build is touched until this succeeds.
+	# 2. Export the pck. Nothing from an earlier build is touched until this
+	# succeeds, and a failed first build leaves no empty port folder behind.
+	var fresh_port := not DirAccess.dir_exists_absolute(out_root)
+	DirAccess.make_dir_recursive_absolute(gamedata)
 	var pck := gamedata.path_join(port + ".pck")
 	if not export_pck(project_dir, pck):
+		if fresh_port:
+			for dir in [gamedata, game_dir, out_root]:
+				DirAccess.remove_absolute(dir)  # only succeeds while empty
 		return false
 	_clean_old_output(out_root, game_dir, port)
 
@@ -605,7 +614,10 @@ func build(project_dir: String, s: Dictionary) -> bool:
 	_say("Wrote gamedata/override.cfg (Compatibility renderer).")
 
 	# 4. Controls
-	var controls := generate_controls(project_dir, s.get("controls", {}), s.get("labels", {}))
+	# The dock computes this on the main thread (it reads ProjectSettings, which
+	# isn't thread-safe); headless callers let the builder do it.
+	var controls := precomputed_controls if not precomputed_controls.is_empty() \
+		else generate_controls(project_dir, s.get("controls", {}), s.get("labels", {}))
 	for p in controls["problems"]:
 		_warn(p)
 	for n in controls["notes"]:
@@ -641,7 +653,11 @@ func build(project_dir: String, s: Dictionary) -> bool:
 	_say("== Done: %s" % out_root)
 	_say("   %d warning(s), %d error(s)." % [warnings, errors])
 	if errors == 0:
-		_say("   Copy %s to the SD card's ports folder, or into PortMaster-New/ports/ and run build_release.py --do-check." % out_root.get_file())
+		_say("   Copy %s to the SD card's ports folder to test it." % out_root.get_file())
+		if submit_todo.is_empty():
+			_say("   To submit, copy it into PortMaster-New/ports/ and run build_release.py --do-check.")
+		else:
+			_say("   Before submitting: %s." % ", ".join(submit_todo))
 	return errors == 0
 
 
@@ -698,14 +714,18 @@ const RUNTIMES_PATH := "/PortsMaster/PortMaster-New/main/runtimes/runtimes.json"
 ## Godot runtime versions PortMaster currently ships, read from PortMaster-New's
 ## runtimes.json (e.g. ["4.2.2", "4.3", ..., "4.7.1"]). Mono builds are skipped.
 ## Blocking; returns [] on any network or parse failure. Call off the main thread.
-static func fetch_godot_runtimes(timeout_ms: int = 8000) -> Array:
+static func _cancelled(should_cancel: Callable) -> bool:
+	return should_cancel.is_valid() and bool(should_cancel.call())
+
+
+static func fetch_godot_runtimes(timeout_ms: int = 8000, should_cancel: Callable = Callable()) -> Array:
 	var http := HTTPClient.new()
 	var deadline := Time.get_ticks_msec() + timeout_ms
 	if http.connect_to_host(RUNTIMES_HOST, 443, TLSOptions.client()) != OK:
 		return []
 	while http.get_status() in [HTTPClient.STATUS_RESOLVING, HTTPClient.STATUS_CONNECTING]:
 		http.poll()
-		if Time.get_ticks_msec() > deadline:
+		if Time.get_ticks_msec() > deadline or _cancelled(should_cancel):
 			return []
 		OS.delay_msec(20)
 	if http.get_status() != HTTPClient.STATUS_CONNECTED:
@@ -714,7 +734,7 @@ static func fetch_godot_runtimes(timeout_ms: int = 8000) -> Array:
 		return []
 	while http.get_status() == HTTPClient.STATUS_REQUESTING:
 		http.poll()
-		if Time.get_ticks_msec() > deadline:
+		if Time.get_ticks_msec() > deadline or _cancelled(should_cancel):
 			return []
 		OS.delay_msec(20)
 	if not http.has_response() or http.get_response_code() != 200:
@@ -724,7 +744,7 @@ static func fetch_godot_runtimes(timeout_ms: int = 8000) -> Array:
 		http.poll()
 		var chunk := http.read_response_body_chunk()
 		if chunk.is_empty():
-			if Time.get_ticks_msec() > deadline:
+			if Time.get_ticks_msec() > deadline or _cancelled(should_cancel):
 				return []
 			OS.delay_msec(20)
 		else:
@@ -752,8 +772,11 @@ func _godot_version(override: String) -> String:
 	# reconnected network is picked up.
 	var retry_due := _runtimes_failed_at < 0 or Time.get_ticks_msec() - _runtimes_failed_at > RUNTIMES_RETRY_MS
 	if _runtimes_cache.is_empty() and retry_due:
-		_runtimes_cache = fetch_godot_runtimes()
-		_runtimes_failed_at = Time.get_ticks_msec() if _runtimes_cache.is_empty() else -1
+		_runtimes_cache = fetch_godot_runtimes(8000, func(): return cancel_requested)
+		if _runtimes_cache.is_empty() and not cancel_requested:
+			_runtimes_failed_at = Time.get_ticks_msec()
+		elif not _runtimes_cache.is_empty():
+			_runtimes_failed_at = -1
 	var known: Array = _runtimes_cache
 	if known.is_empty():
 		known = KNOWN_GODOT_RUNTIMES
@@ -787,11 +810,15 @@ func _clean_old_output(out_root: String, game_dir: String, port: String) -> void
 
 ## Preset fields always set by this addon, never copied from the model preset.
 ## Encryption and patches must stay off: PortMaster's stock runtime can't read an
-## encrypted pck, and a patch pck is useless on its own.
+## encrypted pck, and a patch pck is useless on its own. Custom features (e.g.
+## "steam") and dedicated-server mode belong to the model's own platform build.
+## exclude_filter is merged separately (the model's exclusions plus the addon's).
 const OWN_PRESET_KEYS := [
 	"name", "platform", "runnable", "exclude_filter", "export_path", "patches",
 	"encrypt_pck", "encrypt_directory", "encryption_include_filters", "encryption_exclude_filters",
+	"custom_features", "dedicated_server",
 ]
+const ADDON_EXCLUDES := ["addons/portmaster_export/*", "portmaster/*"]
 
 
 func ensure_preset(project_dir: String) -> bool:
@@ -816,7 +843,7 @@ func ensure_preset(project_dir: String) -> bool:
 		"name": PRESET_NAME, "platform": "Linux", "runnable": false,
 		"advanced_options": false, "dedicated_server": false, "custom_features": "",
 		"export_filter": "all_resources", "include_filter": "",
-		"exclude_filter": "addons/portmaster_export/*, portmaster/*",
+		"exclude_filter": ", ".join(ADDON_EXCLUDES),
 		"export_path": "", "patches": PackedStringArray(),
 		"encryption_include_filters": "", "encryption_exclude_filters": "",
 		"seed": 0, "encrypt_pck": false, "encrypt_directory": false, "script_export_mode": 2,
@@ -829,6 +856,13 @@ func ensure_preset(project_dir: String) -> bool:
 		for key in top.keys():
 			if not copied.has(key):
 				copied[key] = top[key]
+		# Keep whatever the developer excludes from their own builds, plus ours.
+		var excludes := PackedStringArray()
+		for pattern in str(cf.get_value(model, "exclude_filter", "")).split(",") + PackedStringArray(ADDON_EXCLUDES):
+			var p := pattern.strip_edges()
+			if not p.is_empty() and not excludes.has(p):
+				excludes.append(p)
+		copied["exclude_filter"] = ", ".join(excludes)
 		top = copied
 	var opts := {
 		"custom_template/debug": "", "custom_template/release": "",
@@ -1064,8 +1098,13 @@ func readme_text(s: Dictionary, title: String, rows: Array) -> String:
 	var dirs := ["up", "down", "left", "right"]
 	if dirs.all(func(d): return by.has(d)):
 		var stick_same := dirs.all(func(d): return by.has("left_analog_" + d) and by["left_analog_" + d]["key"] == by[d]["key"])
+		# One row for the whole d-pad. Its text is the D-Pad Up label when the user
+		# wrote one in the dock, else a saved "dpad" label, else "Move".
 		var lbl := str(s.get("labels", {}).get("dpad", "Move"))
-		table += "|%s|%s|\n" % ["D-Pad / Left stick" if stick_same else "D-Pad", lbl]
+		var up_label := str(by["up"]["label"]).strip_edges()
+		if not up_label.is_empty() and up_label != str(by["up"]["auto_label"]):
+			lbl = up_label
+		table += "|%s|%s|\n" % ["D-Pad / Left stick" if stick_same else "D-Pad", _md_cell(lbl)]
 		for d in dirs:
 			by.erase(d)
 			if stick_same:
@@ -1075,13 +1114,18 @@ func readme_text(s: Dictionary, title: String, rows: Array) -> String:
 			var lbl := str(by[b]["label"])
 			if lbl.is_empty():
 				lbl = str(by[b]["key"])
-			table += "|%s|%s|\n" % [BUTTON_NAMES[b], lbl]
+			table += "|%s|%s|\n" % [BUTTON_NAMES[b], _md_cell(lbl)]
 	var text := "## Notes\n\n%s\n\n## Controls\n\n%s" % [notes, table]
 	# PortMaster names face buttons by their printed letter (Nintendo layout);
 	# Knulli only matches that with its per-port A/B X/Y swap turned on.
 	if ["a", "b", "x", "y"].any(func(b): return by.has(b)):
 		text += "\nOn Knulli, enable the A/B X/Y swap option.\n"
 	return text
+
+
+## A Markdown table cell: '|' would start a new column.
+static func _md_cell(t: String) -> String:
+	return t.replace("|", "\\|")
 
 
 static func _xml(t: String) -> String:
@@ -1175,6 +1219,13 @@ func _copy_licenses(src: String, dest: String) -> void:
 		_warn("Licences folder %s is empty." % src)
 	else:
 		_say("Copied %d licence file(s)." % n)
+	# PortMaster-New's AGENTS.md: "one LICENSE.<component>.txt per bundled component".
+	var misnamed := PackedStringArray()
+	for f in d.get_files():
+		if not (f.begins_with(".") or f.ends_with(".import") or f.ends_with(".uid") or f.begins_with("LICENSE.")):
+			misnamed.append(f)
+	if not misnamed.is_empty():
+		_warn("PortMaster asks for licences named LICENSE.<component>.txt; rename %s." % ", ".join(misnamed))
 
 
 # ---------------------------------------------------------------- checks
@@ -1193,7 +1244,13 @@ func run_checks(out_root: String, port: String, script_name: String) -> void:
 	if not shot.is_empty():
 		var img := Image.load_from_file(shot)
 		shot_ok = img != null and img.get_width() == 640 and img.get_height() == 480
-	ok = _check(shot_ok, "screenshot is 640x480", "missing or wrong size") and ok
+	# Only the catalogue needs the screenshot; the port runs without it, so this
+	# doesn't fail a build meant for testing on a device.
+	if shot_ok:
+		_say("  ok    screenshot is 640x480")
+	else:
+		submit_todo.append("add a 640x480 screenshot")
+		_say("  TODO  screenshot is 640x480: missing or wrong size (needed before submitting)")
 
 	for f in ["port.json", "README.md", "gameinfo.xml", script_name,
 			port + "/" + port + ".gptk", port + "/gamedata/" + port + ".pck", port + "/gamedata/override.cfg"]:
@@ -1214,8 +1271,10 @@ func run_checks(out_root: String, port: String, script_name: String) -> void:
 				bad_text.append(f.trim_prefix(out_root + "/"))
 	ok = _check(big.is_empty(), "no file over 90 MB", ", ".join(big) + " (split with tools/build_data.py)") and ok
 	ok = _check(bad_text.is_empty(), "text files are LF and UTF-8", ", ".join(bad_text)) and ok
-	if ok:
+	if ok and submit_todo.is_empty():
 		_say("  All checks passed.")
+	elif ok:
+		_say("  The port is complete; it needs the TODO item(s) above before submitting.")
 
 
 func _check(cond: bool, what: String, why: String) -> bool:

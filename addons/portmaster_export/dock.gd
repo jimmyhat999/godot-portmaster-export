@@ -27,9 +27,9 @@ const HINTS := {
 	"genres": "Comma-separated PortMaster genres: action, adventure, arcade, casino/card, fps, platformer, puzzle, racing, rhythm, rpg, simulation, sports, strategy, visual novel, other.",
 	"credits": "One or two sentences for the README, e.g. 'Music by X (link).'",
 	"itch_url": "The game's page: itch.io, Steam, GOG, GitHub... Goes into port.json's store entry.",
-	"release_date": "YYYYMMDD for gameinfo.xml; empty uses the build date.",
-	"godot_runtime": "Blank = match this editor (a patch release like 4.7.2 uses PortMaster's 4.7.1). Set e.g. 4.8 only if PortMaster has a runtime this addon doesn't know.",
-	"screenshot": "640x480, or an exact multiple of 320x240 (scaled down nearest-neighbour).",
+	"release_date": "The game's release date (YYYYMMDD) for gameinfo.xml; left out when empty.",
+	"godot_runtime": "Blank = pick from PortMaster's current runtime list to match this editor (a patch release like 4.7.2 uses 4.7.1). Set a version such as 4.5 only to force a specific runtime.",
+	"screenshot": "PortMaster wants screenshot.png or .jpg at 640x480, showing gameplay. A grab that's an exact multiple of 320x240 is scaled down; other formats are converted to PNG.",
 	"output": "The port folder <output>/<port>/ is written here.",
 }
 
@@ -49,6 +49,11 @@ var big_target: TextEdit
 var thread: Thread
 var builder: RefCounted  # the running build, so closing the editor can cancel it
 var confirmed_issues := ""  # issues shown last time; pressing again with the same issues builds anyway
+var refresh_timer: Timer
+var last_settings_change_ms := -100000  # when ProjectSettings last changed (Time.get_ticks_msec)
+## Godot writes Project Settings / Input Map edits to project.godot 1.5 s after a
+## change; waiting a little longer means the export sees them.
+const SETTINGS_SAVE_WAIT_MS := 2000
 
 
 func _ready() -> void:
@@ -57,6 +62,17 @@ func _ready() -> void:
 	settings = Builder.load_settings(project_dir)
 	_build_ui()
 	_load_into_ui()
+	# Keep the controls table in step with the Input Map. Godot writes Input Map
+	# changes to project.godot shortly after they're made, so wait a moment.
+	refresh_timer = Timer.new()
+	refresh_timer.one_shot = true
+	refresh_timer.wait_time = 2.0
+	refresh_timer.timeout.connect(_refresh_controls)
+	add_child(refresh_timer)
+	ProjectSettings.settings_changed.connect(_on_settings_changed)
+	visibility_changed.connect(func():
+		if is_visible_in_tree():
+			_refresh_controls())
 
 
 ## Only when the dock is really deleted (plugin disabled, editor closing). Moving
@@ -120,6 +136,7 @@ func _build_ui() -> void:
 		else:
 			grid.add_child(input)
 	inputs["port_name"].text_changed.connect(func(_t): _validate_name())
+	inputs["title"].text_changed.connect(func(_t): _validate_name())
 
 	name_status = Label.new()
 	name_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -138,7 +155,7 @@ func _build_ui() -> void:
 	header.add_child(regen)
 
 	var help := Label.new()
-	help.text = "Key: a gptokeyb key name, blank for none. Action: the README text."
+	help.text = "Key: a gptokeyb key name, blank for none. Action: the README text. The README shows the d-pad as one row, named by the D-Pad Up Action."
 	help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	help.modulate = Color(1, 1, 1, 0.6)
 	body.add_child(help)
@@ -193,7 +210,7 @@ func _load_into_ui() -> void:
 	_fill_controls(settings.get("controls", {}), settings.get("labels", {}))
 
 
-func _fill_controls(overrides: Dictionary, labels: Dictionary) -> void:
+func _fill_controls(overrides: Dictionary, labels: Dictionary, log_problems: bool = true) -> void:
 	for c in control_grid.get_children():
 		control_grid.remove_child(c)  # out of the grid now, so old and new rows never mix
 		c.queue_free()
@@ -219,31 +236,41 @@ func _fill_controls(overrides: Dictionary, labels: Dictionary) -> void:
 		label.size_flags_horizontal = SIZE_EXPAND_FILL
 		control_grid.add_child(label)
 		control_rows.append({"row": row, "key": key, "label": label})
-	for p in result["problems"]:
-		_log("Controls: " + p)
+	if log_problems:
+		for p in result["problems"]:
+			_log("Controls: " + p)
 
 
 func _reset_controls() -> void:
 	# Keep the README labels the user wrote (including ones not saved yet).
-	var labels: Dictionary = settings.get("labels", {}).duplicate()
-	for r in control_rows:
-		var text: String = r["label"].text.strip_edges()
-		if text != r["row"]["auto_label"]:
-			labels[r["row"]["button"]] = text
-	_fill_controls({}, labels)
+	_fill_controls({}, _table_edits()["labels"])
 	_log("Controls regenerated from the Input Map (save to keep).")
 
 
+## Live checks for the port name and title, shown under the fields.
 func _validate_name() -> void:
-	var problem := Builder.check_port_name(inputs["port_name"].text.strip_edges())
-	name_status.text = problem
-	name_status.modulate = Color(1, 0.45, 0.4) if problem != "" else Color.WHITE
+	var problems := PackedStringArray()
+	for problem in [Builder.check_port_name(inputs["port_name"].text.strip_edges()),
+			Builder.check_title(inputs["title"].text.strip_edges())]:
+		if problem != "":
+			problems.append(problem)
+	name_status.text = "\n".join(problems)
+	name_status.modulate = Color(1, 0.45, 0.4) if not problems.is_empty() else Color.WHITE
 
 
 func _collect() -> Dictionary:
 	var s := settings.duplicate(true)
 	for key in inputs.keys():
 		s[key] = inputs[key].text.strip_edges()
+	var table := _table_edits()
+	s["controls"] = table["controls"]
+	s["labels"] = table["labels"]
+	return s
+
+
+## The controls table's current edits, saved or not: key overrides (keys that
+## differ from the generated ones) and labels that differ from the generated text.
+func _table_edits() -> Dictionary:
 	var controls := {}
 	var labels: Dictionary = settings.get("labels", {}).duplicate()
 	for r in control_rows:
@@ -257,9 +284,45 @@ func _collect() -> Dictionary:
 			labels[b] = label
 		else:
 			labels.erase(b)
-	s["controls"] = controls
-	s["labels"] = labels
-	return s
+	return {"controls": controls, "labels": labels}
+
+
+func _on_settings_changed() -> void:
+	last_settings_change_ms = Time.get_ticks_msec()
+	_schedule_refresh()
+
+
+## (Re)starts the refresh delay. The timer can't start while the dock is out of
+## the tree, e.g. mid-drag to another panel; it refreshes on becoming visible.
+func _schedule_refresh() -> void:
+	if refresh_timer and refresh_timer.is_inside_tree():
+		refresh_timer.start()
+
+
+## Regenerates the table from the current Input Map, keeping the user's edits.
+## Rebuilds only when the generated mapping changed, and never while the user is
+## typing in the table (it tries again shortly after).
+func _refresh_controls() -> void:
+	if control_rows.is_empty() or not is_inside_tree():
+		return
+	var focus := get_viewport().gui_get_focus_owner()
+	if focus and control_grid.is_ancestor_of(focus):
+		_schedule_refresh()
+		return
+	var table := _table_edits()
+	var fresh := Builder.generate_controls(project_dir, table["controls"], table["labels"])
+	var current := control_rows.map(func(r): return r["row"])
+	if _rows_signature(fresh["rows"]) == _rows_signature(current):
+		return
+	_fill_controls(table["controls"], table["labels"], false)
+
+
+## What the Input Map contributes to the table: each button's generated key and actions.
+static func _rows_signature(rows: Array) -> String:
+	var parts := PackedStringArray()
+	for row in rows:
+		parts.append("%s=%s:%s" % [row["button"], row["auto_key"], ",".join(row["actions"])])
+	return ";".join(parts)
 
 
 func _save() -> void:
@@ -271,7 +334,9 @@ func _save() -> void:
 		_log("Could not save port.cfg: %s" % error_string(err))
 
 
-func _on_build() -> void:
+## `waited` is true on the automatic retry after waiting for Godot's settings
+## save, so a press waits at most once.
+func _on_build(waited: bool = false) -> void:
 	if thread and thread.is_started():
 		# The button is "Cancel build" while a build runs.
 		if builder:
@@ -286,14 +351,31 @@ func _on_build() -> void:
 	if EditorInterface.get_resource_filesystem().is_scanning():
 		_log("Godot is still scanning the project's files. Press Build port again in a moment.")
 		return
+	# The export and the controls read project.godot from disk, and the plugin never
+	# writes it. Godot itself saves Project Settings / Input Map edits 1.5 s after
+	# each change (ProjectSettingsEditor::queue_save), so right after a change wait
+	# for that save instead of second-guessing the editor's unsaved state.
+	var since_change := Time.get_ticks_msec() - last_settings_change_ms
+	# Wait at most once per press: another plugin changing settings every so often
+	# must not postpone the build forever, and one wait covers the user's own edit.
+	if not waited and since_change < SETTINGS_SAVE_WAIT_MS:
+		_log("Project settings were just changed; waiting a moment for Godot to save them...")
+		build_button.disabled = true
+		get_tree().create_timer((SETTINGS_SAVE_WAIT_MS - since_change) / 1000.0).timeout.connect(func():
+			build_button.disabled = false
+			_on_build(true))
+		return
 	# The export reads the project from disk, so unsaved work isn't in it. Saving
 	# an untitled scene would pop up Save As, so those are reported instead.
 	var issues := PackedStringArray()
-	var untitled := EditorInterface.get_open_scene_roots().filter(func(n): return n.scene_file_path.is_empty())
+	# Scenes Godot can't save in place (never saved, or their folder is gone) would
+	# make save_all_scenes() open a Save As dialog.
+	var untitled := EditorInterface.get_open_scene_roots().filter(func(n):
+		return n.scene_file_path.is_empty() or not DirAccess.dir_exists_absolute(n.scene_file_path.get_base_dir()))
 	if untitled.is_empty():
 		EditorInterface.save_all_scenes()
 	else:
-		issues.append("An untitled scene is open, so open scenes weren't saved. Save your scenes (Scene > Save All Scenes) first.")
+		issues.append("An open scene has never been saved, or its folder no longer exists, so open scenes weren't saved. Save your scenes (Scene > Save All Scenes) first.")
 	var differs := _unsaved_scripts()
 	if not differs.is_empty():
 		issues.append("These open scripts differ from the files on disk. Either they have unsaved changes (save them), or the file changed outside Godot (reload it when Godot asks):\n    %s" % "\n    ".join(differs))
@@ -311,6 +393,9 @@ func _on_build() -> void:
 	build_button.text = "Cancel build"
 	builder = Builder.new()
 	builder.log_callback = func(msg: String): _log.call_deferred(msg)
+	# Generated here on the main thread: it reads ProjectSettings, which isn't
+	# safe to read from the build thread while the editor may be changing it.
+	builder.precomputed_controls = Builder.generate_controls(project_dir, settings.get("controls", {}), settings.get("labels", {}))
 	thread = Thread.new()
 	thread.start(_run_build.bind(settings.duplicate(true)))
 
@@ -367,7 +452,7 @@ func _browse(target: LineEdit, is_dir: bool) -> void:
 	file_dialog.file_mode = EditorFileDialog.FILE_MODE_OPEN_DIR if is_dir else EditorFileDialog.FILE_MODE_OPEN_FILE
 	file_dialog.clear_filters()
 	if not is_dir:
-		file_dialog.add_filter("*.png, *.jpg", "Images")
+		file_dialog.add_filter("*.png, *.jpg, *.jpeg, *.webp, *.bmp, *.tga", "Images")
 	var current := Builder.resolve_path(target.text, project_dir)
 	if not current.is_empty():
 		file_dialog.current_dir = current if is_dir else current.get_base_dir()

@@ -47,13 +47,22 @@ One press of **Build port**:
 1. **Fill in the dock:** port name (lowercase, unique in PortMaster's
    catalogue), title (it also names the launcher file), porter, developer,
    description, genres, store URL (itch.io, Steam, GOG...) and README credits. Long fields have an **Edit** button for a larger editor.
-2. **Add a screenshot** at the screenshot path: 640x480, or a 1280x960 grab.
+2. **Add a screenshot** at the screenshot path. PortMaster wants a 640x480
+   `screenshot.png` or `.jpg` showing gameplay. A grab that's an exact multiple
+   of 320x240 (e.g. 1280x960) is scaled down, and other formats are converted to
+   PNG. A cover (`cover.png`/`.jpg`) is optional. You can build and test on a
+   device without a screenshot; the log lists it under "Before submitting".
 3. **Add licences:** one file per third-party asset (fonts, music, art) in the
-   licences folder, by default `res://portmaster/licenses/`.
+   licences folder, by default `res://portmaster/licenses/`. Name them
+   `LICENSE.<component>.txt`, as PortMaster asks.
 4. **Check the controls table.** Change a key to override it, clear it to unmap
-   the button, and fill in the Action column for the README.
-5. **Press Build port.** It saves your open scenes first, because the export
-   reads files from disk. If an open script differs from its file, or an
+   the button, and fill in the Action column for the README. The README shows
+   the d-pad as a single row, named by the D-Pad Up Action.
+5. **Press Build port.** It saves your open scenes first, like Scene > Save All
+   Scenes, because the export reads files from disk. If another tool edits scene
+   files while they're open in Godot, reload them before building. It never
+   writes `project.godot`. If you've just changed a project setting, it waits
+   a moment for Godot to save it. If an open script differs from its file, or an
    untitled scene is open, it tells you and waits; press Build port again to
    build from the files on disk anyway. While it runs, the button becomes
    **Cancel build**. The build log shows each step and the checks. If a build
@@ -63,7 +72,9 @@ The export runs in a second, headless Godot on your project. Godot 4.5 doesn't
 let a plugin export from inside the editor, so avoid editing or saving until the
 build finishes. The editor rescans the project afterwards.
 
-**Reset to Input Map** regenerates the keys and keeps your Action labels.
+The controls table follows the Input Map. When you change a binding, it updates
+a moment later and keeps your edits. **Reset to Input Map** also discards your
+key overrides, but keeps your Action labels.
 Set **Release date** (YYYYMMDD) to the game's release date; when it's blank,
 `gameinfo.xml` leaves it out.
 
@@ -72,7 +83,9 @@ folder gets a `.gdignore`, so Godot doesn't import the screenshot or licences
 and they never end up in your game.
 
 The first build adds a "PortMaster" export preset (Linux, arm64, pck only,
-ETC2/ASTC) to `export_presets.cfg`. Restart the editor to see it in
+ETC2/ASTC) to `export_presets.cfg`. It copies your Windows preset's settings and
+exclusions, but not encryption, custom features (such as `steam`) or
+dedicated-server mode. Restart the editor to see it in
 Project > Export. Restart before opening that dialog, or the editor may save
 over the new preset.
 
