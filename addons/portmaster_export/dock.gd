@@ -48,6 +48,7 @@ var big_edit: TextEdit
 var big_target: TextEdit
 var thread: Thread
 var builder: RefCounted  # the running build, so closing the editor can cancel it
+var confirm_pending := false  # pre-build issues were shown; the next press builds anyway
 
 
 func _ready() -> void:
@@ -58,7 +59,14 @@ func _ready() -> void:
 	_load_into_ui()
 
 
-func _exit_tree() -> void:
+## Only when the dock is really deleted (plugin disabled, editor closing). Moving
+## the tab to another panel also exits the tree, and must not cancel a build.
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_PREDELETE:
+		_stop_build()
+
+
+func _stop_build() -> void:
 	if thread and thread.is_started():
 		if builder:
 			builder.cancel_requested = true  # kills the export so the editor isn't held up
@@ -258,17 +266,34 @@ func _save() -> void:
 
 func _on_build() -> void:
 	if thread and thread.is_started():
+		# The button is "Cancel build" while a build runs.
+		if builder:
+			builder.cancel_requested = true
+		build_button.disabled = true
+		build_button.text = "Cancelling..."
 		return
 	log_box.text = ""
-	# The export runs in a separate Godot that reads the project from disk.
-	EditorInterface.save_all_scenes()
-	var unsaved := _unsaved_scripts()
-	if not unsaved.is_empty():
-		_log("These scripts have unsaved changes, which the export wouldn't include:\n  %s\nSave them (File > Save All in the script editor), then build again." % "\n  ".join(unsaved))
+	# The export runs in a separate Godot that reads the project from disk, so
+	# unsaved work isn't in it. Saving an untitled scene would pop up Save As, so
+	# those are reported instead of saved.
+	var issues := PackedStringArray()
+	var untitled := EditorInterface.get_open_scene_roots().filter(func(n): return n.scene_file_path.is_empty())
+	if untitled.is_empty():
+		EditorInterface.save_all_scenes()
+	else:
+		issues.append("An untitled scene is open, so open scenes weren't saved. Save your scenes (Scene > Save All Scenes) first.")
+	var differs := _unsaved_scripts()
+	if not differs.is_empty():
+		issues.append("These open scripts differ from the files on disk. Either they have unsaved changes (save them), or the file changed outside Godot (reload it when Godot asks):\n    %s" % "\n    ".join(differs))
+	if not issues.is_empty() and not confirm_pending:
+		for issue in issues:
+			_log(issue)
+		_log("The export uses the files on disk. Press Build port again to build from them anyway.")
+		confirm_pending = true
 		return
+	confirm_pending = false
 	_save()
-	build_button.disabled = true
-	build_button.text = "Building..."
+	build_button.text = "Cancel build"
 	builder = Builder.new()
 	builder.log_callback = func(msg: String): _log.call_deferred(msg)
 	thread = Thread.new()
@@ -294,7 +319,8 @@ func _run_build(s: Dictionary) -> void:
 
 
 func _build_finished(ok: bool) -> void:
-	thread.wait_to_finish()
+	if thread and thread.is_started():
+		thread.wait_to_finish()
 	builder = null
 	build_button.disabled = false
 	build_button.text = "Build port"
@@ -334,7 +360,27 @@ func _browse(target: LineEdit, is_dir: bool) -> void:
 func _on_path_chosen(path: String) -> void:
 	if dialog_target == null:
 		return
-	path = path.replace("\\", "/")
-	if path.begins_with(project_dir + "/"):
-		path = "res://" + path.substr(project_dir.length() + 1)
-	dialog_target.text = path
+	dialog_target.text = portable_path(path, project_dir)
+
+
+## res:// inside the project, a path relative to the project elsewhere on the
+## same drive, so port.cfg works on other machines. Absolute only across drives.
+static func portable_path(path: String, base: String) -> String:
+	path = path.replace("\\", "/").simplify_path()
+	base = base.replace("\\", "/").simplify_path()
+	if path.to_lower() == base.to_lower():
+		return "res://"
+	if path.to_lower().begins_with(base.to_lower() + "/"):
+		return "res://" + path.substr(base.length() + 1)
+	var p := path.split("/")
+	var b := base.split("/")
+	if p[0].to_lower() != b[0].to_lower():
+		return path
+	var common := 0
+	while common < mini(p.size(), b.size()) and p[common].to_lower() == b[common].to_lower():
+		common += 1
+	var parts := PackedStringArray()
+	for i in b.size() - common:
+		parts.append("..")
+	parts.append_array(p.slice(common))
+	return "/".join(parts)

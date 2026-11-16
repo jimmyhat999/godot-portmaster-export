@@ -153,6 +153,8 @@ const LAUNCHER_TEMPLATE := [
 var log_callback: Callable
 ## Set from another thread to stop a running build (the export is killed).
 var cancel_requested := false
+static var _runtimes_cache: Array = []
+static var _runtimes_fetched := false
 var warnings := 0
 var errors := 0
 
@@ -259,6 +261,11 @@ static func check_title(title: String) -> String:
 			return "Title can't contain \\ / : * ? \" < > | (it becomes the launcher's filename, '%s.sh')." % title
 	if title.ends_with(".") or title.ends_with(" ") or title.begins_with(" "):
 		return "Title can't start with a space or end with a space or '.' (it becomes the launcher's filename)."
+	var reserved := ["CON", "PRN", "AUX", "NUL"]
+	for i in range(1, 10):
+		reserved.append_array(["COM%d" % i, "LPT%d" % i])
+	if title.get_slice(".", 0).strip_edges().to_upper() in reserved:
+		return "'%s' is a reserved filename on Windows, so it can't name the launcher; choose another title." % title
 	return ""
 
 
@@ -450,7 +457,9 @@ static func generate_controls(project_dir: String, overrides: Dictionary = {}, l
 			notes.append("%s left unmapped: only %s uses it, and %s would also trigger %s." % [src, ", ".join(bound), best, ", ".join(hit)])
 			continue
 		auto[src] = best
-		if hit.size() > 0:
+		if hit.size() > 0 and not directional:
+			# Directions sharing the arrow keys with the game's own movement actions is
+			# normal, so only mention clashes for buttons.
 			notes.append("%s = %s also triggers %s." % [src, best, ", ".join(hit)])
 
 	# The left stick drives whatever the d-pad does when nothing binds it directly.
@@ -558,6 +567,8 @@ func build(project_dir: String, s: Dictionary) -> bool:
 	var ver := _godot_version(str(s.get("godot_runtime", "")))
 	if ver.is_empty():
 		return false
+	if cancel_requested:
+		return _fail("Build cancelled; the previous port was left as it was.")
 
 	# 1. Export preset
 	if not ensure_preset(project_dir):
@@ -712,7 +723,12 @@ func _godot_version(override: String) -> String:
 	var v := Engine.get_version_info()
 	if str(v["status"]) != "stable":
 		_warn("Godot %s is not a stable build; PortMaster only has runtimes for stable releases." % v["string"])
-	var known := fetch_godot_runtimes()
+	# Fetched once per editor session; an offline attempt isn't retried, so later
+	# builds don't each wait for the network timeout.
+	if not _runtimes_fetched:
+		_runtimes_fetched = true
+		_runtimes_cache = fetch_godot_runtimes()
+	var known: Array = _runtimes_cache
 	if known.is_empty():
 		known = KNOWN_GODOT_RUNTIMES
 		_say("Couldn't fetch PortMaster's runtime list; using the built-in one (%s)." % ", ".join(known))
@@ -763,8 +779,7 @@ func ensure_preset(project_dir: String) -> bool:
 		while cf.has_section("preset.%d" % count):
 			var sec := "preset.%d" % count
 			if str(cf.get_value(sec, "name", "")) == PRESET_NAME:
-				_check_preset(cf, sec)
-				return true
+				return _check_preset(cf, sec)
 			if model.is_empty() and str(cf.get_value(sec, "platform", "")) == "Windows Desktop":
 				model = sec
 			count += 1
@@ -823,17 +838,19 @@ func ensure_preset(project_dir: String) -> bool:
 	return true
 
 
-func _check_preset(cf: ConfigFile, sec: String) -> void:
+## Checks an existing PortMaster preset; false (with an error) when it can't work.
+func _check_preset(cf: ConfigFile, sec: String) -> bool:
 	var o := sec + ".options"
+	if bool(cf.get_value(sec, "encrypt_pck", false)):
+		return _fail("Preset '%s' encrypts the pck, and PortMaster's Godot runtime can't open an encrypted pck. Turn encryption off in that preset (Project > Export)." % PRESET_NAME)
 	if str(cf.get_value(sec, "platform", "")) != "Linux":
 		_warn("Preset '%s' is not a Linux preset." % PRESET_NAME)
 	if str(cf.get_value(o, "binary_format/architecture", "")) != "arm64":
 		_warn("Preset '%s' is not arm64; most handhelds need arm64." % PRESET_NAME)
-	if bool(cf.get_value(sec, "encrypt_pck", false)):
-		_warn("Preset '%s' encrypts the pck; PortMaster's Godot runtime can't open an encrypted pck. Turn encryption off in that preset." % PRESET_NAME)
 	if not bool(cf.get_value(o, "texture_format/etc2_astc", false)):
 		_warn("Preset '%s' has ETC2/ASTC off; GLES3 handhelds need it for VRAM-compressed textures." % PRESET_NAME)
 	_say("Using existing export preset '%s'." % PRESET_NAME)
+	return true
 
 
 # ---------------------------------------------------------------- export
@@ -856,8 +873,10 @@ func export_pck(project_dir: String, pck: String) -> bool:
 	while OS.is_process_running(pid):
 		if cancel_requested:
 			OS.kill(pid)
-			if FileAccess.file_exists(tmp):
-				DirAccess.remove_absolute(tmp)
+			OS.delay_msec(200)  # let Windows release the files
+			for leftover in [tmp, log_path]:
+				if FileAccess.file_exists(leftover):
+					DirAccess.remove_absolute(leftover)
 			return _fail("Build cancelled; the previous port was left as it was.")
 		OS.delay_msec(100)
 	var code := OS.get_process_exit_code(pid)

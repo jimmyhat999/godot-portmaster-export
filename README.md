@@ -52,10 +52,12 @@ One press of **Build port**:
    licences folder, by default `res://portmaster/licenses/`.
 4. **Check the controls table.** Change a key to override it, clear it to unmap
    the button, and fill in the Action column for the README.
-5. **Press Build port.** It saves your open scenes first. It won't start while
-   an open script has unsaved changes, because the export reads files from
-   disk. The build log shows each step and the checks. If a build fails or you
-   close the editor mid-build, the previous port is left as it was.
+5. **Press Build port.** It saves your open scenes first, because the export
+   reads files from disk. If an open script differs from its file, or an
+   untitled scene is open, it tells you and waits; press Build port again to
+   build from the files on disk anyway. While it runs, the button becomes
+   **Cancel build**. The build log shows each step and the checks. If a build
+   fails or is cancelled, the previous port is left as it was.
 
 Settings are saved in `res://portmaster/port.cfg`. The `res://portmaster/`
 folder gets a `.gdignore`, so Godot doesn't import the screenshot or licences
