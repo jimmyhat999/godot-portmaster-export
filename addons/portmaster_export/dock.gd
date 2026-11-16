@@ -48,7 +48,7 @@ var big_edit: TextEdit
 var big_target: TextEdit
 var thread: Thread
 var builder: RefCounted  # the running build, so closing the editor can cancel it
-var confirm_pending := false  # pre-build issues were shown; the next press builds anyway
+var confirmed_issues := ""  # issues shown last time; pressing again with the same issues builds anyway
 
 
 func _ready() -> void:
@@ -133,7 +133,7 @@ func _build_ui() -> void:
 	header.add_child(title)
 	var regen := Button.new()
 	regen.text = "Reset to Input Map"
-	regen.tooltip_text = "Discard the overrides below and regenerate from the project's Input Map."
+	regen.tooltip_text = "Regenerate the keys from the project's Input Map, discarding key overrides. Your Action labels are kept."
 	regen.pressed.connect(_reset_controls)
 	header.add_child(regen)
 
@@ -195,6 +195,7 @@ func _load_into_ui() -> void:
 
 func _fill_controls(overrides: Dictionary, labels: Dictionary) -> void:
 	for c in control_grid.get_children():
+		control_grid.remove_child(c)  # out of the grid now, so old and new rows never mix
 		c.queue_free()
 	control_rows.clear()
 	var result := Builder.generate_controls(project_dir, overrides, labels)
@@ -223,7 +224,13 @@ func _fill_controls(overrides: Dictionary, labels: Dictionary) -> void:
 
 
 func _reset_controls() -> void:
-	_fill_controls({}, {})
+	# Keep the README labels the user wrote (including ones not saved yet).
+	var labels: Dictionary = settings.get("labels", {}).duplicate()
+	for r in control_rows:
+		var text: String = r["label"].text.strip_edges()
+		if text != r["row"]["auto_label"]:
+			labels[r["row"]["button"]] = text
+	_fill_controls({}, labels)
 	_log("Controls regenerated from the Input Map (save to keep).")
 
 
@@ -273,9 +280,14 @@ func _on_build() -> void:
 		build_button.text = "Cancelling..."
 		return
 	log_box.text = ""
-	# The export runs in a separate Godot that reads the project from disk, so
-	# unsaved work isn't in it. Saving an untitled scene would pop up Save As, so
-	# those are reported instead of saved.
+	# The export runs in a second, headless Godot on this project (a plugin can't
+	# export from inside the editor in 4.5). Start it only once the editor has
+	# finished scanning, so the two don't import the same files at once.
+	if EditorInterface.get_resource_filesystem().is_scanning():
+		_log("Godot is still scanning the project's files. Press Build port again in a moment.")
+		return
+	# The export reads the project from disk, so unsaved work isn't in it. Saving
+	# an untitled scene would pop up Save As, so those are reported instead.
 	var issues := PackedStringArray()
 	var untitled := EditorInterface.get_open_scene_roots().filter(func(n): return n.scene_file_path.is_empty())
 	if untitled.is_empty():
@@ -285,14 +297,17 @@ func _on_build() -> void:
 	var differs := _unsaved_scripts()
 	if not differs.is_empty():
 		issues.append("These open scripts differ from the files on disk. Either they have unsaved changes (save them), or the file changed outside Godot (reload it when Godot asks):\n    %s" % "\n    ".join(differs))
-	if not issues.is_empty() and not confirm_pending:
+	# Pressing again builds anyway, but only past the same issues just shown.
+	var issue_text := "\n".join(issues)
+	if not issues.is_empty() and issue_text != confirmed_issues:
 		for issue in issues:
 			_log(issue)
 		_log("The export uses the files on disk. Press Build port again to build from them anyway.")
-		confirm_pending = true
+		confirmed_issues = issue_text
 		return
-	confirm_pending = false
+	confirmed_issues = ""
 	_save()
+	_log("Building in a separate Godot process. Avoid editing or saving until it finishes.")
 	build_button.text = "Cancel build"
 	builder = Builder.new()
 	builder.log_callback = func(msg: String): _log.call_deferred(msg)
@@ -325,6 +340,8 @@ func _build_finished(ok: bool) -> void:
 	build_button.disabled = false
 	build_button.text = "Build port"
 	_log("Build %s." % ("succeeded" if ok else "FAILED"))
+	# The export process may have (re)imported files; let the editor catch up.
+	EditorInterface.get_resource_filesystem().scan()
 
 
 func _log(msg: String) -> void:
@@ -368,19 +385,24 @@ func _on_path_chosen(path: String) -> void:
 static func portable_path(path: String, base: String) -> String:
 	path = path.replace("\\", "/").simplify_path()
 	base = base.replace("\\", "/").simplify_path()
-	if path.to_lower() == base.to_lower():
-		return "res://"
-	if path.to_lower().begins_with(base.to_lower() + "/"):
-		return "res://" + path.substr(base.length() + 1)
+	if Builder.is_inside(path, base):
+		var rest := path.substr(base.length()).trim_prefix("/")
+		return "res://" + rest
+	# Windows paths are case-insensitive; Linux and macOS ones aren't.
+	var fold := OS.get_name() == "Windows"
 	var p := path.split("/")
 	var b := base.split("/")
-	if p[0].to_lower() != b[0].to_lower():
+	if not _same(p[0], b[0], fold):
 		return path
 	var common := 0
-	while common < mini(p.size(), b.size()) and p[common].to_lower() == b[common].to_lower():
+	while common < mini(p.size(), b.size()) and _same(p[common], b[common], fold):
 		common += 1
 	var parts := PackedStringArray()
 	for i in b.size() - common:
 		parts.append("..")
 	parts.append_array(p.slice(common))
 	return "/".join(parts)
+
+
+static func _same(a: String, b: String, fold: bool) -> bool:
+	return a.to_lower() == b.to_lower() if fold else a == b

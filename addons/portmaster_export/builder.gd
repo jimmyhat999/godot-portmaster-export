@@ -154,7 +154,8 @@ var log_callback: Callable
 ## Set from another thread to stop a running build (the export is killed).
 var cancel_requested := false
 static var _runtimes_cache: Array = []
-static var _runtimes_fetched := false
+static var _runtimes_failed_at := -1
+const RUNTIMES_RETRY_MS := 5 * 60 * 1000
 var warnings := 0
 var errors := 0
 
@@ -224,6 +225,17 @@ static func save_settings(project_dir: String, s: Dictionary) -> Error:
 		if f:
 			f.close()
 	return cf.save(path)
+
+
+## True when `path` is `dir` or below it. Case-insensitive only on Windows,
+## whose file system is; elsewhere Game/ and game/ are different folders.
+static func is_inside(path: String, dir: String) -> bool:
+	var p := path.replace("\\", "/").simplify_path().trim_suffix("/")
+	var d := dir.replace("\\", "/").simplify_path().trim_suffix("/")
+	if OS.get_name() == "Windows":
+		p = p.to_lower()
+		d = d.to_lower()
+	return p == d or p.begins_with(d + "/")
 
 
 ## res:// paths are resolved against the project, relative paths against it too.
@@ -373,10 +385,12 @@ static func generate_controls(project_dir: String, overrides: Dictionary = {}, l
 	for name in actions.keys():
 		var keys := PackedStringArray()
 		var sources := PackedStringArray()
+		var chords := PackedStringArray()
 		for ev in actions[name]["events"]:
 			if ev is InputEventKey:
 				if ev.shift_pressed or ev.ctrl_pressed or ev.alt_pressed or ev.meta_pressed:
-					continue  # gptokeyb sends single keys, not chords
+					chords.append(ev.as_text())  # gptokeyb sends single keys, not chords
+					continue
 				var k := key_name(ev)
 				if k.is_empty():
 					var kc: int = ev.keycode if ev.keycode != KEY_NONE else ev.physical_keycode
@@ -403,6 +417,8 @@ static func generate_controls(project_dir: String, overrides: Dictionary = {}, l
 				elif not sources.has(src):
 					sources.append(src)
 		info[name] = {"keys": keys, "sources": sources, "project": actions[name]["project"]}
+		if actions[name]["project"] and keys.is_empty() and sources.is_empty() and not chords.is_empty():
+			problems.append("'%s' is only bound to key combinations (%s), which gptokeyb can't send, so it can't be used on the device. Give it a single key or a gamepad button." % [name, ", ".join(chords)])
 		for src in sources:
 			if not by_source.has(src):
 				by_source[src] = []
@@ -559,6 +575,9 @@ func build(project_dir: String, s: Dictionary) -> bool:
 	var out_root := resolve_path(str(s.get("output", "")), project_dir)
 	if out_root.is_empty():
 		return _fail("Output folder is not set.")
+	if is_inside(out_root, project_dir):
+		# Godot would import the port's images and could pack them into the game.
+		return _fail("Output folder %s is inside the project. Choose a folder outside it (the default is ../PortMaster)." % out_root)
 	out_root = out_root.path_join(port)
 	var game_dir := out_root.path_join(port)
 	var gamedata := game_dir.path_join("gamedata")
@@ -638,6 +657,9 @@ static func pick_runtime(v: Dictionary, override: String = "", known: Array = KN
 	var out := {"ver": "", "editor": editor, "error": "", "note": ""}
 	override = override.strip_edges().trim_prefix("godot_")
 	if not override.is_empty():
+		if RegEx.create_from_string("^[0-9]+[.][0-9]+(?:[.][0-9]+)?$").search(override) == null:
+			out["error"] = "Godot runtime '%s' isn't a version like 4.5 or 4.7.1. Leave it blank to match this editor." % override
+			return out
 		out["ver"] = override
 		if not known.has(override):
 			out["note"] = "Runtime godot_%s is set by hand and not in PortMaster's list (%s); check it exists." % [override, ", ".join(known)]
@@ -725,9 +747,13 @@ func _godot_version(override: String) -> String:
 		_warn("Godot %s is not a stable build; PortMaster only has runtimes for stable releases." % v["string"])
 	# Fetched once per editor session; an offline attempt isn't retried, so later
 	# builds don't each wait for the network timeout.
-	if not _runtimes_fetched:
-		_runtimes_fetched = true
+	# A successful fetch is kept for the editor session. A failed one (offline) is
+	# retried after a few minutes, so builds don't each wait for the timeout but a
+	# reconnected network is picked up.
+	var retry_due := _runtimes_failed_at < 0 or Time.get_ticks_msec() - _runtimes_failed_at > RUNTIMES_RETRY_MS
+	if _runtimes_cache.is_empty() and retry_due:
 		_runtimes_cache = fetch_godot_runtimes()
+		_runtimes_failed_at = Time.get_ticks_msec() if _runtimes_cache.is_empty() else -1
 	var known: Array = _runtimes_cache
 	if known.is_empty():
 		known = KNOWN_GODOT_RUNTIMES
@@ -987,10 +1013,16 @@ static func store_entry(url: String) -> Dictionary:
 
 
 func gameinfo_text(s: Dictionary, title: String, genres: PackedStringArray, shot_name: String = "screenshot.png") -> String:
+	# The game's release date, not the build's. Left out (with a warning) when it
+	# isn't set, rather than inventing one that changes on every rebuild.
 	var date := str(s.get("release_date", "")).strip_edges().replace("-", "")
-	if date.length() != 8:
-		var t := Time.get_date_dict_from_system()
-		date = "%04d%02d%02d" % [t["year"], t["month"], t["day"]]
+	var date_line := ""
+	if date.is_empty():
+		_warn("Release date is empty, so gameinfo.xml has none. Set it (YYYYMMDD) to the game's release date.")
+	elif date.length() != 8 or not date.is_valid_int():
+		_warn("Release date '%s' isn't YYYYMMDD, so gameinfo.xml has none." % date)
+	else:
+		date_line = "    <releasedate>%sT000000</releasedate>\n" % date
 	var dev := str(s.get("developer", "")).strip_edges()
 	var genre := genres[0].capitalize() if genres.size() > 0 else "Other"
 	if genres.size() > 0 and genres[0] == "casino/card":
@@ -1002,14 +1034,13 @@ func gameinfo_text(s: Dictionary, title: String, genres: PackedStringArray, shot
     <path>./%s.sh</path>
     <name>%s</name>
     <desc>%s</desc>
-    <releasedate>%sT000000</releasedate>
-    <developer>%s</developer>
+%s    <developer>%s</developer>
     <publisher>%s</publisher>
     <genre>%s</genre>
     <image>./%s/%s</image>
   </game>
 </gameList>
-""" % [_xml(title), _xml(title), _xml(str(s.get("description", "")).strip_edges()), date,
+""" % [_xml(title), _xml(title), _xml(str(s.get("description", "")).strip_edges()), date_line,
 		_xml(dev), _xml(dev), _xml(genre), port, shot_name]
 
 

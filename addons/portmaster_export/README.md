@@ -59,6 +59,14 @@ One press of **Build port**:
    **Cancel build**. The build log shows each step and the checks. If a build
    fails or is cancelled, the previous port is left as it was.
 
+The export runs in a second, headless Godot on your project. Godot 4.5 doesn't
+let a plugin export from inside the editor, so avoid editing or saving until the
+build finishes. The editor rescans the project afterwards.
+
+**Reset to Input Map** regenerates the keys and keeps your Action labels.
+Set **Release date** (YYYYMMDD) to the game's release date; when it's blank,
+`gameinfo.xml` leaves it out.
+
 Settings are saved in `res://portmaster/port.cfg`. The `res://portmaster/`
 folder gets a `.gdignore`, so Godot doesn't import the screenshot or licences
 and they never end up in your game.
