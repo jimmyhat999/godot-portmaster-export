@@ -8,6 +8,12 @@ extends "task.gd"
 ##   b.build(project_dir, b.load_settings(project_dir))
 
 const SETTINGS_FILE := "portmaster/port.cfg"
+
+## Godot 4.3 added --log-file, OS.get_process_exit_code() and InputEventKey.location,
+## and merged the preset's texture formats into s3tc_bptc and etc2_astc. Godot
+## 4.5 added the shader baker and EditorInterface.get_open_scene_roots().
+static var godot_4_3_plus := int(Engine.get_version_info()["hex"]) >= 0x040300
+static var godot_4_5_plus := int(Engine.get_version_info()["hex"]) >= 0x040500
 const PRESET_NAME := "PortMaster"
 const MAX_FILE_BYTES := 90 * 1024 * 1024
 
@@ -150,7 +156,7 @@ const LAUNCHER_TEMPLATE := [
 	"pm_finish",
 ]
 
-# log_callback, cancel_requested (kills the export), warnings and errors come
+# log_callback, cancel() (kills the export), warnings and errors come
 # from task.gd.
 static var _runtimes_cache: Array = []
 static var _runtimes_failed_at := -1
@@ -316,10 +322,13 @@ static func key_name(ev: InputEventKey) -> String:
 		return "f%d" % (kc - KEY_F1 + 1)
 	if kc >= KEY_KP_0 and kc <= KEY_KP_9:
 		return "numpad%d" % (kc - KEY_KP_0)
+	# A 4.2 project doesn't record the side of Shift, Ctrl or Alt, so those keys
+	# map to plain shift/ctrl/alt there.
 	var side := ""
-	if ev.location == KEY_LOCATION_LEFT:
+	var location := int(ev.get("location")) if godot_4_3_plus else 0
+	if location == 1:  # KEY_LOCATION_LEFT
 		side = "left"
-	elif ev.location == KEY_LOCATION_RIGHT:
+	elif location == 2:  # KEY_LOCATION_RIGHT
 		side = "right"
 	match kc:
 		KEY_SPACE: return "space"
@@ -801,7 +810,7 @@ func ensure_preset(project_dir: String) -> bool:
 		while cf.has_section("preset.%d" % count):
 			var sec := "preset.%d" % count
 			if str(cf.get_value(sec, "name", "")) == PRESET_NAME:
-				return _check_preset(cf, sec)
+				return _check_preset(cf, sec, path)
 			if model.is_empty() and str(cf.get_value(sec, "platform", "")) == "Windows Desktop":
 				model = sec
 			count += 1
@@ -837,11 +846,15 @@ func ensure_preset(project_dir: String) -> bool:
 		"custom_template/debug": "", "custom_template/release": "",
 		"debug/export_console_wrapper": 1,
 		"binary_format/embed_pck": false,
-		"texture_format/s3tc_bptc": false,
-		"texture_format/etc2_astc": true,
-		"shader_baker/enabled": false,
-		"binary_format/architecture": "arm64",
 	}
+	if godot_4_3_plus:
+		opts.merge({"texture_format/s3tc_bptc": false, "texture_format/etc2_astc": true})
+	else:
+		opts.merge({"texture_format/bptc": false, "texture_format/s3tc": false,
+			"texture_format/etc": false, "texture_format/etc2": true})
+	if godot_4_5_plus:
+		opts["shader_baker/enabled"] = false
+	opts["binary_format/architecture"] = "arm64"
 
 	var text := "\n[preset.%d]\n\n" % count
 	for key in top.keys():
@@ -868,57 +881,158 @@ func ensure_preset(project_dir: String) -> bool:
 
 
 ## Checks an existing PortMaster preset; false (with an error) when it can't work.
-func _check_preset(cf: ConfigFile, sec: String) -> bool:
+func _check_preset(cf: ConfigFile, sec: String, path: String) -> bool:
 	var o := sec + ".options"
+	# Godot 4.3 renamed the ETC2 option; a preset saved by the other side lacks
+	# this version's key, so its export would leave ETC2 out.
+	var etc2_key := "texture_format/etc2_astc" if godot_4_3_plus else "texture_format/etc2"
+	var other_etc2_key := "texture_format/etc2" if godot_4_3_plus else "texture_format/etc2_astc"
+	if cf.has_section_key(o, other_etc2_key) and not cf.has_section_key(o, etc2_key):
+		_convert_texture_keys(cf, o, path)
 	if bool(cf.get_value(sec, "encrypt_pck", false)):
 		return _fail("Preset '%s' encrypts the pck, and PortMaster's Godot runtime can't open an encrypted pck. Turn encryption off in that preset (Project > Export)." % PRESET_NAME)
 	if str(cf.get_value(sec, "platform", "")) != "Linux":
 		_warn("Preset '%s' is not a Linux preset." % PRESET_NAME)
 	if str(cf.get_value(o, "binary_format/architecture", "")) != "arm64":
 		_warn("Preset '%s' is not arm64; most handhelds need arm64." % PRESET_NAME)
-	if not bool(cf.get_value(o, "texture_format/etc2_astc", false)):
+	if not bool(cf.get_value(o, etc2_key, false)):
 		_warn("Preset '%s' has ETC2/ASTC off; GLES3 handhelds need it for VRAM-compressed textures." % PRESET_NAME)
 	_say("Using existing export preset '%s'." % PRESET_NAME)
 	return true
 
 
+## Godot 4.2 writes texture_format/etc2 (and etc, s3tc, bptc); 4.3+ merged them
+## into etc2_astc and s3tc_bptc, and neither reads the other's keys. Adds this
+## version's keys with the same choices; the other's stay for that editor.
+func _convert_texture_keys(cf: ConfigFile, o: String, path: String) -> void:
+	var keys := {}
+	var note: String
+	if godot_4_3_plus:
+		var s3tc_bptc := bool(cf.get_value(o, "texture_format/s3tc", false)) or bool(cf.get_value(o, "texture_format/bptc", false))
+		keys = {"texture_format/s3tc_bptc": s3tc_bptc,
+			"texture_format/etc2_astc": bool(cf.get_value(o, "texture_format/etc2", false))}
+		note = "Godot 4.3's texture options (it was made in Godot 4.2)"
+	else:
+		var s3tc_bptc := bool(cf.get_value(o, "texture_format/s3tc_bptc", false))
+		keys = {"texture_format/bptc": s3tc_bptc, "texture_format/s3tc": s3tc_bptc,
+			"texture_format/etc": false,
+			"texture_format/etc2": bool(cf.get_value(o, "texture_format/etc2_astc", false))}
+		note = "Godot 4.2's texture options (it was made in a newer Godot)"
+	var text := FileAccess.get_file_as_string(path)
+	var at := text.find("[%s]" % o)
+	at = text.find("\n", at) + 1 if at != -1 else -1
+	if at > 0 and text.substr(at, 1) == "\n":
+		at += 1  # after the blank line under the section header
+	if at <= 0:
+		_warn("Couldn't update preset '%s' for this Godot version. Check its ETC2/ASTC option (Project > Export)." % PRESET_NAME)
+		return
+	var lines := ""
+	for key in keys:
+		lines += "%s=%s\n" % [key, keys[key]]
+	text = text.insert(at, lines)
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if f == null:
+		_warn("Couldn't update preset '%s' in %s (%s). Check its ETC2/ASTC option (Project > Export)." % [PRESET_NAME, path, error_string(FileAccess.get_open_error())])
+		return
+	f.store_string(text)
+	f.close()
+	for key in keys:
+		cf.set_value(o, key, keys[key])
+	_say("Updated preset '%s' to %s." % [PRESET_NAME, note])
+	_say("  Restart the editor before opening Project > Export, or it may save over the change.")
+
+
 # ---------------------------------------------------------------- export
+
+## Temp pck of the export running on Godot 4.2, where OS.execute gives no pid:
+## cancel() finds the process by this path on its command line. The build
+## thread sets it and cancel() reads it, so both go through _export_lock, which
+## also makes "cancelled before the export started" and "export running" exclusive.
+var _blocking_export := ""
+var _export_lock := Mutex.new()
+var _killer_running := false  # a kill worker is running; under _export_lock
+var _killer_tasks: Array[int] = []  # their WorkerThreadPool ids; under _export_lock
+
 
 ## Exports to a temporary file and only replaces `pck` when the export succeeds,
 ## so a failed build leaves the previous port intact. Runs Godot as a child
-## process that `cancel_requested` can stop (e.g. when the editor closes).
+## process that cancel() stops (e.g. when the editor closes).
 func export_pck(project_dir: String, pck: String) -> bool:
 	var tmp := pck.get_basename() + ".building.pck"
 	if FileAccess.file_exists(tmp):
 		DirAccess.remove_absolute(tmp)
 	var godot := OS.get_executable_path()
-	var log_path := OS.get_cache_dir().path_join("portmaster_export_%d.log" % Time.get_ticks_usec())
-	var args := PackedStringArray(["--headless", "--path", project_dir,
-		"--log-file", log_path, "--export-pack", PRESET_NAME, tmp])
+	var args := PackedStringArray(["--headless", "--path", project_dir, "--export-pack", PRESET_NAME, tmp])
+	var log_path := ""
+	if godot_4_3_plus:
+		log_path = OS.get_cache_dir().path_join("portmaster_export_%d.log" % Time.get_ticks_usec())
+		args.insert(3, "--log-file")
+		args.insert(4, log_path)
 	_say("Exporting pck: %s %s" % [godot.get_file(), " ".join(args)])
-	var pid := OS.create_process(godot, args, false)
-	if pid <= 0:
-		return _fail("Couldn't start %s for the export." % godot)
-	while OS.is_process_running(pid):
-		if cancel_requested:
-			OS.kill(pid)
-			OS.delay_msec(200)  # let Windows release the files
-			for leftover in [tmp, log_path]:
-				if FileAccess.file_exists(leftover):
-					DirAccess.remove_absolute(leftover)
-			return _fail("Build cancelled; the previous port was left as it was.")
-		OS.delay_msec(100)
-	var code := OS.get_process_exit_code(pid)
+	var code := 0
 	var text := ""
-	if FileAccess.file_exists(log_path):
-		text = FileAccess.get_file_as_string(log_path)
-		DirAccess.remove_absolute(log_path)
+	var crashed := false
+	if not godot_4_3_plus:
+		# Godot 4.2 has no --log-file or OS.get_process_exit_code(), so the export
+		# runs blocking with its output captured, and cancel() kills it by its
+		# command line.
+		var output := []
+		_export_lock.lock()
+		var start := not cancel_requested
+		if start:
+			_blocking_export = tmp
+		_export_lock.unlock()
+		if start:
+			var exe := godot
+			var exe_args := args
+			if OS.get_name() != "Windows":
+				# Godot 4.2 runs this through sh on Linux and macOS: one line with
+				# each argument in double quotes, where sh still reads $, `, " and \.
+				exe = _escape_for_sh_quotes(godot)
+				exe_args = PackedStringArray(Array(args).map(_escape_for_sh_quotes))
+			code = OS.execute(exe, exe_args, output, true)
+		_export_lock.lock()
+		_blocking_export = ""
+		var killers := _killer_tasks.duplicate()
+		_killer_tasks.clear()
+		_export_lock.unlock()
+		# A kill worker stops once the export has ended; wait for it, so none
+		# outlives the build or logs after it.
+		for id in killers:
+			WorkerThreadPool.wait_for_task_completion(id)
+		text = "\n".join(output)
+		if cancel_requested:  # before the start check: a killed export can report -1
+			if FileAccess.file_exists(tmp):
+				DirAccess.remove_absolute(tmp)
+			return _fail("Build cancelled; the previous port was left as it was.")
+		if code == -1:
+			return _fail("Couldn't start %s for the export." % godot)
+		# On Linux and macOS, Godot 4.2 reports an export killed by a signal as
+		# exit code 0, and the pck may be cut short; its crash handler says so.
+		crashed = text.contains("Program crashed with signal")
+	else:
+		var pid := OS.create_process(godot, args, false)
+		if pid <= 0:
+			return _fail("Couldn't start %s for the export." % godot)
+		while OS.is_process_running(pid):
+			if cancel_requested:
+				OS.kill(pid)
+				OS.delay_msec(200)  # let Windows release the files
+				for leftover in [tmp, log_path]:
+					if FileAccess.file_exists(leftover):
+						DirAccess.remove_absolute(leftover)
+				return _fail("Build cancelled; the previous port was left as it was.")
+			OS.delay_msec(100)
+		code = OS.call("get_process_exit_code", pid)  # not called directly: 4.2 can't parse it
+		if FileAccess.file_exists(log_path):
+			text = FileAccess.get_file_as_string(log_path)
+			DirAccess.remove_absolute(log_path)
 	# Keep errors and warnings (with their "at:" line); drop the per-file progress.
 	var interesting := PackedStringArray()
 	var keep_next := false
 	for line in text.split("\n"):
 		var l := line.strip_edges()
-		if l.begins_with("ERROR") or l.begins_with("WARNING") or l.begins_with("SCRIPT ERROR"):
+		if l.begins_with("ERROR") or l.begins_with("WARNING") or l.begins_with("SCRIPT ERROR") or l.contains("Program crashed with signal"):
 			interesting.append("    " + l)
 			keep_next = true
 		elif keep_next and l.begins_with("at:"):
@@ -928,9 +1042,11 @@ func export_pck(project_dir: String, pck: String) -> bool:
 			keep_next = false
 	if interesting.size() > 0:
 		_say("  export output:\n" + "\n".join(interesting.slice(0, 40)))
-	if code != 0 or not FileAccess.file_exists(tmp):
+	if code != 0 or crashed or not FileAccess.file_exists(tmp):
 		if FileAccess.file_exists(tmp):
 			DirAccess.remove_absolute(tmp)
+		if crashed:
+			return _fail("The export crashed. See the export output above; the previous port was left as it was.")
 		if code != 0:
 			return _fail("Export failed (exit code %d). See the export output above; the previous port was left as it was." % code)
 		return _fail("Export finished but wrote no pck; the previous port was left as it was.")
@@ -941,6 +1057,120 @@ func export_pck(project_dir: String, pck: String) -> bool:
 	var size := FileAccess.open(pck, FileAccess.READ).get_length()
 	_say("Exported %s (%.1f MB)." % [pck.get_file(), size / 1048576.0])
 	return true
+
+
+func cancel() -> void:
+	_export_lock.lock()
+	cancel_requested = true
+	# Off the main thread: listing processes takes a second or two, and the
+	# export may not have appeared yet. Added under the lock, so the build
+	# thread sees the id once the export ends and waits for the worker.
+	if not _blocking_export.is_empty() and not _killer_running:
+		_killer_running = true
+		_killer_tasks.append(WorkerThreadPool.add_task(_kill_export_worker.bind(self)))
+	_export_lock.unlock()
+
+
+func _export_marker() -> String:
+	_export_lock.lock()
+	var marker := _blocking_export
+	_export_lock.unlock()
+	return marker
+
+
+func _kill_worker_done() -> void:
+	_export_lock.lock()
+	_killer_running = false  # a later cancel() may try again
+	_export_lock.unlock()
+
+
+## Kills Godot 4.2's export once it shows up in the process list. Gives up,
+## saying why, when processes can't be listed or it can't be stopped in time;
+## the build then ends when the export does.
+static func _kill_export_worker(task: RefCounted) -> void:
+	var deadline := Time.get_ticks_msec() + 10000
+	var found := false
+	while true:
+		var marker: String = task._export_marker()
+		if marker.is_empty():
+			break  # the export has ended
+		var r := _kill_matching(task, marker)
+		if int(r["killed"]) > 0 or task._export_marker() != marker:
+			break  # stopped, or it ended by itself while the list was read
+		found = found or int(r["found"]) > 0
+		var reason := str(r["error"])
+		if reason.is_empty() and Time.get_ticks_msec() > deadline:
+			reason = "found it, but stopping it failed" if found else "didn't find it"
+		if not reason.is_empty():
+			task._say("Couldn't stop the export (%s), so the build ends when it finishes." % reason)
+			break
+		OS.delay_msec(300)
+	task._kill_worker_done()
+
+
+## Kills the processes whose command line contains `marker`, while `task`'s
+## export is still running: the temp path is the same every build, so once it
+## ends, a match could be the next build's export.
+## Returns {found, killed, error}; error is "" unless processes couldn't be listed.
+static func _kill_matching(task: RefCounted, marker: String) -> Dictionary:
+	var listed := _pids_with_arg(marker)
+	var pids: Array = listed["pids"]
+	var out := {"found": pids.size(), "killed": 0, "error": listed["error"]}
+	for pid: int in pids:
+		if task._export_marker() != marker:
+			break  # the export ended while the list was read
+		if pid > 0 and pid != OS.get_process_id() and OS.kill(pid) == OK:
+			out["killed"] += 1
+	return out
+
+
+## `s` for inside the double quotes Godot 4.2's OS.execute puts around each
+## argument on Linux and macOS, where sh would otherwise expand $ and `, and
+## end the quotes at ".
+static func _escape_for_sh_quotes(s: String) -> String:
+	return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("$", "\\$").replace("`", "\\`")
+
+
+## {pids, error}: the PIDs of the processes whose command line contains `text`,
+## or an error saying why the process list couldn't be read.
+static func _pids_with_arg(text: String) -> Dictionary:
+	var output := []
+	var pids: Array[int] = []
+	var tool: String
+	var code: int
+	if OS.get_name() == "Windows":
+		# PowerShell does the matching and prints only PIDs: Godot decodes a
+		# child's output with the ANSI code page, which garbles accented paths.
+		# `text` goes in as base64, so no character in a path (PowerShell also
+		# treats curly quotes as quotes) can break or change the script; that
+		# also keeps it off PowerShell's own command line, and the $PID check
+		# is only a safeguard. By full path when it's there, as Godot may run
+		# with a PATH that lacks it.
+		tool = OS.get_environment("SystemRoot").path_join("System32/WindowsPowerShell/v1.0/powershell.exe")
+		if not FileAccess.file_exists(tool):
+			tool = "powershell"
+		var script := "$m = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('%s')); Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine.Contains($m) } | ForEach-Object { $_.ProcessId }" % Marshalls.utf8_to_base64(text)
+		code = OS.execute(tool, ["-NoProfile", "-NonInteractive", "-Command", script], output)
+		if code == 0:
+			for line in "\n".join(output).split("\n"):
+				if line.strip_edges().is_valid_int():
+					pids.append(line.strip_edges().to_int())
+	else:
+		# -ww: full command lines; the marker comes last and could be cut off.
+		tool = "ps"
+		code = OS.execute(tool, ["-ww", "-eo", "pid=,args="], output)
+		if code == 0:
+			var line_re := RegEx.create_from_string("^\\s*(\\d+) (.*)$")
+			for line in "\n".join(output).split("\n"):
+				var m := line_re.search(line.strip_edges(false, true))
+				if m and m.get_string(2).contains(text):
+					pids.append(m.get_string(1).to_int())
+	var error := ""
+	if code == -1:
+		error = "couldn't run %s" % tool.get_file()
+	elif code != 0:
+		error = "%s failed with exit code %d" % [tool.get_file(), code]
+	return {"pids": pids, "error": error}
 
 
 # ---------------------------------------------------------------- text files

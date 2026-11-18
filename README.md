@@ -28,7 +28,10 @@ One press of **Build port**:
 
 ## Requirements
 
-- **Godot 4.5 or newer.** Tested on 4.5 and 4.7.2.
+- **Godot 4.2 or newer.** Tested on 4.2.2, 4.3, 4.4.1, 4.5 and 4.7.2.
+  Godot 4.0 and 4.1 games use PortMaster's older FRT runtime, which this
+  plugin doesn't target. On 4.2, left and right Shift, Ctrl and Alt map to
+  the same key, because 4.2 doesn't record which side.
 - **GDScript projects.** C# projects need PortMaster's Mono runtime, which
   this plugin doesn't support yet.
 - **No export templates.** The plugin only exports a pck, so you don't need
@@ -68,7 +71,7 @@ One press of **Build port**:
    **Cancel build**. The Log section shows each step and the checks. If a build
    fails or is cancelled, the previous port is left as it was.
 
-The export runs in a second, headless Godot on your project. Godot 4.5 doesn't
+The export runs in a second, headless Godot on your project. Godot doesn't
 let a plugin export from inside the editor, so avoid editing or saving until the
 build finishes. The editor rescans the project afterwards.
 

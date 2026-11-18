@@ -5,7 +5,7 @@ config_version=5
 [application]
 
 config/name="PortMaster Export"
-config/features=PackedStringArray("4.5")
+config/features=PackedStringArray("4.2")
 
 [editor_plugins]
 

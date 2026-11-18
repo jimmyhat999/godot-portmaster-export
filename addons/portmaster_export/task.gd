@@ -6,11 +6,16 @@ extends RefCounted
 
 var log_callback: Callable
 ## Set from another thread to stop the job.
-var cancel_requested := false
+var cancel_requested := false  # set through cancel()
 var warnings := 0
 var errors := 0
 
 const USER_AGENT := "User-Agent: godot-portmaster-export"
+
+
+## Asks the task to stop; called from the main thread while the task runs.
+func cancel() -> void:
+	cancel_requested = true
 
 
 ## Fetches `url` over HTTP(S), following redirects (GitHub release downloads

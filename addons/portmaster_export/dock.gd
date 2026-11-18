@@ -104,7 +104,7 @@ func _notification(what: int) -> void:
 func _stop_build() -> void:
 	if thread and thread.is_started():
 		if builder:
-			builder.cancel_requested = true  # kills the export so the editor isn't held up
+			builder.cancel()  # kills the export so the editor isn't held up
 		thread.wait_to_finish()
 
 
@@ -455,13 +455,13 @@ func _on_build(waited: bool = false) -> void:
 			return
 		# The button is "Cancel build" while a build runs.
 		if builder:
-			builder.cancel_requested = true
+			builder.cancel()
 		build_button.disabled = true
 		build_button.text = "Cancelling..."
 		return
 	log_box.text = ""
 	# The export runs in a second, headless Godot on this project (a plugin can't
-	# export from inside the editor in 4.5). Start it only once the editor has
+	# export from inside the editor). Start it only once the editor has
 	# finished scanning, so the two don't import the same files at once.
 	if EditorInterface.get_resource_filesystem().is_scanning():
 		_log("Godot is still scanning the project's files. Press the button again in a moment.")
@@ -487,8 +487,8 @@ func _on_build(waited: bool = false) -> void:
 	var issues := PackedStringArray()
 	# Scenes Godot can't save in place (never saved, or their folder is gone) would
 	# make save_all_scenes() open a Save As dialog.
-	var untitled := EditorInterface.get_open_scene_roots().filter(func(n):
-		return n.scene_file_path.is_empty() or not DirAccess.dir_exists_absolute(n.scene_file_path.get_base_dir()))
+	var untitled := _open_scene_paths().filter(func(p: String):
+		return p.is_empty() or not DirAccess.dir_exists_absolute(p.get_base_dir()))
 	if untitled.is_empty():
 		EditorInterface.save_all_scenes()
 	else:
@@ -510,7 +510,7 @@ func _on_build(waited: bool = false) -> void:
 	build_button.text = "Cancel build"
 	install_button.disabled = true
 	builder = Builder.new()
-	builder.log_callback = func(msg: String): _log.call_deferred(msg)
+	builder.log_callback = _log_later
 	# Generated here on the main thread: it reads ProjectSettings, which isn't
 	# safe to read from the build thread while the editor may be changing it.
 	builder.precomputed_controls = Builder.generate_controls(project_dir, settings.get("controls", {}), settings.get("labels", {}))
@@ -529,6 +529,14 @@ func _unsaved_scripts() -> PackedStringArray:
 		if script.source_code.replace("\r", "") != on_disk:
 			out.append(path)
 	return out
+
+
+## The open scenes' paths, "" for one never saved. Before Godot 4.5 there's no
+## get_open_scene_roots(), but get_open_scenes() lists an untitled scene as "".
+static func _open_scene_paths() -> Array:
+	if Builder.godot_4_5_plus:
+		return Array(EditorInterface.call("get_open_scene_roots")).map(func(n: Node): return n.scene_file_path)
+	return Array(EditorInterface.get_open_scenes())
 
 
 func _run_build(s: Dictionary) -> void:
@@ -657,7 +665,7 @@ func _on_device_selected(index: int) -> void:
 func _on_install() -> void:
 	if thread and thread.is_started():
 		if builder is DeviceInstall:
-			builder.cancel_requested = true
+			builder.cancel()
 			install_button.disabled = true
 			install_button.text = "Cancelling..."
 		return
@@ -741,7 +749,7 @@ func _start_install() -> void:
 	if t.is_empty():
 		return
 	builder = DeviceInstall.new()
-	builder.log_callback = func(msg: String): _log.call_deferred(msg)
+	builder.log_callback = _log_later
 	install_button.text = "Cancel install"
 	build_button.disabled = true
 	thread = Thread.new()
@@ -761,6 +769,12 @@ func _install_finished(ok: bool) -> void:
 	install_button.text = "Install port"
 	build_button.disabled = false
 	_log("Install %s." % ("succeeded" if ok else "FAILED"))
+
+
+## The tasks' log callback: queues the line for the main thread. A method rather
+## than a lambda: in Godot 4.2, _log.call_deferred() inside a lambda finds no self.
+func _log_later(msg: String) -> void:
+	_log.call_deferred(msg)
 
 
 func _log(msg: String) -> void:
