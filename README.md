@@ -172,8 +172,12 @@ list, falling back to a built-in copy when offline. It then picks:
 - **Otherwise, the newest runtime in your editor's series,** e.g. a 4.7.2 editor
   uses `godot_4.7.1`. Godot only rejects a pck from a newer *minor* version, so
   this works, but the log reminds you to test on a device.
-- **If there's none for your series,** the build stops. You can force a
-  runtime with the dock's **Godot runtime** field.
+- **If there's none for your series,** the build stops.
+
+The dock's **Godot runtime** box (under Advanced) shows that choice in grey,
+e.g. `godot_4.5 (auto)`; leave it empty to use it. Type a version only to
+force one, e.g. when PortMaster has added a runtime and you're offline. The
+build warns if it's from another Godot series, which can't load your export.
 
 ## Controls
 

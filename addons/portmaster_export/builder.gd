@@ -674,7 +674,10 @@ static func pick_runtime(v: Dictionary, override: String = "", known: Array = KN
 			out["error"] = "Godot runtime '%s' isn't a version like 4.5 or 4.7.1. Leave it blank to match this editor." % override
 			return out
 		out["ver"] = override
-		if not known.has(override):
+		var series := "%d.%d" % [v["major"], v["minor"]]
+		if not override.begins_with(series + ".") and override != series:
+			out["note"] = "Runtime godot_%s is set by hand but this editor is Godot %s; a runtime from another series may not load this export. Set Godot runtime to Auto unless you're sure." % [override, editor]
+		elif not known.has(override):
 			out["note"] = "Runtime godot_%s is set by hand and not in PortMaster's list (%s); check it exists." % [override, ", ".join(known)]
 		return out
 	if known.has(editor):

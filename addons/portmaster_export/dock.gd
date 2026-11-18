@@ -29,7 +29,7 @@ const HINTS := {
 	"credits": "One or two sentences for the README, e.g. 'Music by X (link).'",
 	"itch_url": "The game's page: itch.io, Steam, GOG, GitHub... Goes into port.json's store entry.",
 	"release_date": "The game's release date (YYYYMMDD) for gameinfo.xml; left out when empty.",
-	"godot_runtime": "Blank = pick from PortMaster's current runtime list to match this editor (a patch release like 4.7.2 uses 4.7.1). Set a version such as 4.5 only to force a specific runtime.",
+	"godot_runtime": "Leave empty to use the runtime shown in grey: PortMaster's runtime that matches this editor (a patch release like 4.7.2 uses 4.7.1). Type a version such as 4.8 only to force one, e.g. when PortMaster has added a runtime and you're offline; a runtime from another Godot series can't load this editor's export.",
 	"screenshot": "PortMaster wants screenshot.png or .jpg at 640x480, showing gameplay. A grab that's an exact multiple of 320x240 is scaled down; other formats are converted to PNG.",
 	"output": "The port folder <output>/<port>/ is written here.",
 }
@@ -51,6 +51,7 @@ var scan_task := -1  # WorkerThreadPool task looking for cards; -1 when none
 var check_task := -1  # WorkerThreadPool task checking the card before an install; -1 when none
 var check_cancelled := false  # Cancel was pressed while the card check ran; ignore its result
 var install_root := ""  # the card checked for the install in progress; it doesn't follow the dropdown
+var runtime_versions: Array = Builder.KNOWN_GODOT_RUNTIMES  # PortMaster's list once fetched
 ## The dropdown's last item, which opens a folder picker (e.g. for a network share).
 const OTHER_FOLDER := ":other"
 var runtimes_check: CheckBox
@@ -291,7 +292,34 @@ func _load_into_ui() -> void:
 	device_root = str(meta.get_project_metadata("portmaster_export", "device_root", ""))
 	runtimes_check.button_pressed = bool(meta.get_project_metadata("portmaster_export", "copy_runtimes", true))
 	build_first_check.button_pressed = bool(meta.get_project_metadata("portmaster_export", "build_first", true))
+	_show_runtime_default()
 	_scan_devices()
+	# PortMaster's current runtime list, in the background; until it arrives
+	# (or when offline) the dropdown uses the plugin's built-in list.
+	WorkerThreadPool.add_task(_fetch_runtimes_worker.bind(weakref(self)))
+
+
+static func _fetch_runtimes_worker(dock: WeakRef) -> void:
+	_deliver_runtimes.call_deferred(dock, Builder.fetch_godot_runtimes(8000))
+
+
+static func _deliver_runtimes(dock: WeakRef, versions: Array) -> void:
+	var d: Object = dock.get_ref()
+	if d and not versions.is_empty():
+		d.runtime_versions = versions
+		d._show_runtime_default()
+
+
+## Shows, in grey inside the empty Godot runtime box, the runtime the build
+## uses when it's left empty: the one matching this editor.
+func _show_runtime_default() -> void:
+	var v := Engine.get_version_info()
+	var auto := Builder.pick_runtime(v, "", runtime_versions)
+	var edit: LineEdit = inputs["godot_runtime"]
+	if str(auto["error"]).is_empty():
+		edit.placeholder_text = "godot_%s (auto)" % auto["ver"]
+	else:
+		edit.placeholder_text = "none for Godot %d.%d yet" % [v["major"], v["minor"]]
 
 
 func _fill_controls(overrides: Dictionary, labels: Dictionary, log_problems: bool = true) -> void:
