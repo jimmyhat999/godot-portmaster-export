@@ -1,5 +1,5 @@
 @tool
-extends RefCounted
+extends "task.gd"
 ## Packages a Godot project as a PortMaster port.
 ##
 ## Usable from the editor dock or headless:
@@ -150,14 +150,11 @@ const LAUNCHER_TEMPLATE := [
 	"pm_finish",
 ]
 
-var log_callback: Callable
-## Set from another thread to stop a running build (the export is killed).
-var cancel_requested := false
+# log_callback, cancel_requested (kills the export), warnings and errors come
+# from task.gd.
 static var _runtimes_cache: Array = []
 static var _runtimes_failed_at := -1
 const RUNTIMES_RETRY_MS := 5 * 60 * 1000
-var warnings := 0
-var errors := 0
 ## Things the catalogue needs that a device test doesn't (e.g. the screenshot).
 var submit_todo := PackedStringArray()
 ## generate_controls() result computed by the caller on the main thread; when
@@ -653,7 +650,7 @@ func build(project_dir: String, s: Dictionary) -> bool:
 	_say("== Done: %s" % out_root)
 	_say("   %d warning(s), %d error(s)." % [warnings, errors])
 	if errors == 0:
-		_say("   Copy %s to the SD card's ports folder to test it." % out_root.get_file())
+		_say("   To test it on a device, use Install port in the dock (an installed port is laid out differently from this folder).")
 		if submit_todo.is_empty():
 			_say("   To submit, copy it into PortMaster-New/ports/ and run build_release.py --do-check.")
 		else:
@@ -714,42 +711,11 @@ const RUNTIMES_PATH := "/PortsMaster/PortMaster-New/main/runtimes/runtimes.json"
 ## Godot runtime versions PortMaster currently ships, read from PortMaster-New's
 ## runtimes.json (e.g. ["4.2.2", "4.3", ..., "4.7.1"]). Mono builds are skipped.
 ## Blocking; returns [] on any network or parse failure. Call off the main thread.
-static func _cancelled(should_cancel: Callable) -> bool:
-	return should_cancel.is_valid() and bool(should_cancel.call())
-
-
 static func fetch_godot_runtimes(timeout_ms: int = 8000, should_cancel: Callable = Callable()) -> Array:
-	var http := HTTPClient.new()
-	var deadline := Time.get_ticks_msec() + timeout_ms
-	if http.connect_to_host(RUNTIMES_HOST, 443, TLSOptions.client()) != OK:
+	var got := http_get("https://%s%s" % [RUNTIMES_HOST, RUNTIMES_PATH], timeout_ms, should_cancel, "", timeout_ms)
+	if not got["ok"]:
 		return []
-	while http.get_status() in [HTTPClient.STATUS_RESOLVING, HTTPClient.STATUS_CONNECTING]:
-		http.poll()
-		if Time.get_ticks_msec() > deadline or _cancelled(should_cancel):
-			return []
-		OS.delay_msec(20)
-	if http.get_status() != HTTPClient.STATUS_CONNECTED:
-		return []
-	if http.request(HTTPClient.METHOD_GET, RUNTIMES_PATH, ["User-Agent: godot-portmaster-export"]) != OK:
-		return []
-	while http.get_status() == HTTPClient.STATUS_REQUESTING:
-		http.poll()
-		if Time.get_ticks_msec() > deadline or _cancelled(should_cancel):
-			return []
-		OS.delay_msec(20)
-	if not http.has_response() or http.get_response_code() != 200:
-		return []
-	var body := PackedByteArray()
-	while http.get_status() == HTTPClient.STATUS_BODY:
-		http.poll()
-		var chunk := http.read_response_body_chunk()
-		if chunk.is_empty():
-			if Time.get_ticks_msec() > deadline or _cancelled(should_cancel):
-				return []
-			OS.delay_msec(20)
-		else:
-			body.append_array(chunk)
-	var data: Variant = JSON.parse_string(body.get_string_from_utf8())
+	var data: Variant = JSON.parse_string(PackedByteArray(got["body"]).get_string_from_utf8())
 	if not data is Dictionary:
 		return []
 	var re := RegEx.create_from_string("^godot_([0-9]+[.][0-9]+(?:[.][0-9]+)?)[.]squashfs$")
@@ -1308,21 +1274,3 @@ func _write(path: String, text: String) -> void:
 		return
 	f.store_string(text.replace("\r\n", "\n"))
 	f.close()
-
-
-func _say(msg: String) -> void:
-	if log_callback.is_valid():
-		log_callback.call(msg)
-	else:
-		print(msg)
-
-
-func _warn(msg: String) -> void:
-	warnings += 1
-	_say("  WARNING: " + msg)
-
-
-func _fail(msg: String) -> bool:
-	errors += 1
-	_say("ERROR: " + msg)
-	return false

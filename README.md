@@ -65,7 +65,7 @@ One press of **Build port**:
    a moment for Godot to save it. If an open script differs from its file, or an
    untitled scene is open, it tells you and waits; press Build port again to
    build from the files on disk anyway. While it runs, the button becomes
-   **Cancel build**. The build log shows each step and the checks. If a build
+   **Cancel build**. The Log section shows each step and the checks. If a build
    fails or is cancelled, the previous port is left as it was.
 
 The export runs in a second, headless Godot on your project. Godot 4.5 doesn't
@@ -105,12 +105,63 @@ The port goes to `<output>/<port>/`. By default that's
     licenses/
 ```
 
-- **Play it:** copy the `<port>/` folder into the ports folder on your
-  device's SD card.
+- **Play it:** use **Install port** (below). PortMaster installs ports in a
+  slightly different layout from this one, so copying the folder by hand isn't
+  enough.
 - **Submit it:** copy the folder into `ports/` in a clone of
   [PortMaster-New](https://github.com/PortsMaster/PortMaster-New), run
   `python tools/build_release.py --do-check`, then follow PortMaster's
   testing and pull-request process.
+
+## Install to an SD card
+
+To test on a device before the port is in PortMaster's catalogue, put the
+device's SD card in your computer and press **Install port**. The dock's
+**SD card** list shows the drives that hold a handheld's card, with its
+firmware, e.g. `E:  (Knulli)`; press **Refresh** after putting a card in. For a card reached
+over the network (such as Knulli's Samba share), choose **Other folder...**
+and pick the share's root folder. With **Build first** ticked (the default),
+it builds the port and installs it only if the build succeeds, so the card
+always gets your latest changes. Untick it to install the last build again
+without rebuilding, e.g. to put the same build on another device's SD card.
+
+It installs the port the way PortMaster's own installer would and checks every
+copied file. It never deletes the port's saves (`conf/`) on the card.
+PortMaster must have been run once on the device.
+
+| Firmware | Where the port goes | Tested on a device |
+|---|---|---|
+| NextUI (with the PortMaster pak) | `Roms/Ports (PORTS)/.ports/`; the launcher also in `Roms/Ports (PORTS)/`; the screenshot becomes the Ports menu picture | Yes (TrimUI Brick) |
+| Knulli, Batocera, REG-Linux | `roms/ports/` on the SHARE partition | Knulli (TrimUI Brick) |
+| ArkOS, dArkOS | `ports/` on the EASYROMS partition | No |
+| ROCKNIX, JELOS | `roms/ports/` on the games card | No |
+| AmberELEC, UnofficialOS | `ports/` on the games partition | No |
+
+The card layouts come from PortMaster's own installer. On every firmware
+except NextUI, the port's title, description and screenshot are added to the
+Ports game list (`gamelist.xml`), keeping play counts and favourites; the
+previous list is kept as `gamelist.xml.bak`, as PortMaster does. The
+installer doesn't use PortMaster's autoinstall, which can hang on Knulli.
+- **Not supported yet:** muOS, TrimUI's stock firmware, CrossMix, Spruce and
+  Onion use their own layouts. Their cards are listed as "not supported yet",
+  and Install port explains why.
+  ROCKNIX on a single card, and Knulli with an ext4 SHARE partition, can't be
+  read from Windows at all.
+- **Add missing runtimes** (on by default) copies the Godot runtime and Weston
+  onto the card, so the first launch doesn't need Wi-Fi. It downloads the build
+  for the device's CPU (aarch64, armhf or x86_64, as PortMaster recorded it on
+  the card) and checks it against PortMaster's checksum; if PortMaster hasn't run
+  on the device yet, it leaves the download to the first launch. Runtimes already
+  on the card are never replaced. On NextUI it never adds Weston, because the pak
+  ships its own, and PortMaster's doesn't run there.
+- **Checks:** on NextUI, it warns when the `nintendo` file is missing, because
+  without it A/B and X/Y are swapped in every port. It also warns when
+  PortMaster has replaced the pak's Weston, which stops Godot ports starting.
+  On Knulli, it reads the card's settings and warns when the ports' A/B X/Y
+  swap (Xbox layout) is off.
+
+Eject the card safely afterwards. The chosen card is remembered per project on
+this computer, not in `port.cfg`.
 
 ## Godot runtimes
 
