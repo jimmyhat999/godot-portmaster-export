@@ -1,6 +1,6 @@
 # PortMaster Export
 
-A Godot 4 editor plugin that packages your game as a
+A Godot 4.2+ editor plugin that packages your game as a
 [PortMaster](https://portmaster.games/) port for Linux handhelds, ready to copy
 to an SD card or submit to the PortMaster catalogue.
 
