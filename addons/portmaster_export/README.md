@@ -25,6 +25,7 @@ One press of **Build port**:
    multiple of 320x240, and licences go into a flat `licenses/` folder.
 7. **Checks the result** against PortMaster's rules: name, screenshot size,
    required files, file sizes, line endings and encoding.
+8. **Zips it for testers**, ready to post in PortMaster's testing threads.
 
 ## Requirements
 
@@ -34,6 +35,9 @@ One press of **Build port**:
   the same key, because 4.2 doesn't record which side.
 - **GDScript projects.** C# projects need PortMaster's Mono runtime, which
   this plugin doesn't support yet.
+- **No GDExtensions, for now.** Their native libraries can't go in the pck, and
+  the plugin doesn't ship them beside it yet. The build warns about each one,
+  and says whether it has the Linux ARM64 library a handheld needs.
 - **No export templates.** The plugin only exports a pck, so you don't need
   them.
 
@@ -55,9 +59,11 @@ One press of **Build port**:
    of 320x240 (e.g. 1280x960) is scaled down, and other formats are converted to
    PNG. A cover (`cover.png`/`.jpg`) is optional. You can build and test on a
    device without a screenshot; the log lists it under "Before submitting".
-3. **Add licences:** one file per third-party asset (fonts, music, art) in the
-   licences folder, by default `res://portmaster/licenses/`. Name them
-   `LICENSE.<component>.txt`, as PortMaster asks.
+3. **Add licences** to the licences folder, by default
+   `res://portmaster/licenses/`: one for the game itself,
+   `LICENSE.<port name>.txt`, with its licence or your permission for
+   PortMaster to distribute it, and one per third-party asset (fonts, music,
+   art). Name them `LICENSE.<component>.txt`, as PortMaster asks.
 4. **Check the controls table.** Change a key to override it, clear it to unmap
    the button, and fill in the Action column for the README. The README shows
    the d-pad as a single row, named by the D-Pad Up Action.
@@ -94,8 +100,9 @@ over the new preset.
 
 ## Output
 
-The port goes to `<output>/<port>/`. By default that's
-`<project>/../PortMaster/<port>/`, outside your project.
+The port goes to `<output>/<port>/`, with a zip of it at
+`<output>/<port>.zip`. By default that's `<project>/../PortMaster/`, outside
+your project.
 
 ```
 <port>/
@@ -111,6 +118,8 @@ The port goes to `<output>/<port>/`. By default that's
 - **Play it:** use **Install port** (below). PortMaster installs ports in a
   slightly different layout from this one, so copying the folder by hand isn't
   enough.
+- **Share it with testers:** post `<port>.zip`. PortMaster installs it from
+  its `autoinstall` folder, like any port zip.
 - **Submit it:** copy the folder into `ports/` in a clone of
   [PortMaster-New](https://github.com/PortsMaster/PortMaster-New), run
   `python tools/build_release.py --do-check`, then follow PortMaster's

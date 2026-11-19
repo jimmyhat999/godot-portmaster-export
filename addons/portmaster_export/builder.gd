@@ -70,13 +70,29 @@ deadzone_scale = 8
 deadzone_delay = 16
 """
 
-## PortMaster's Godot 4 launcher, verbatim from the merged supermazerobo port.
+## ROCKNIX's libMali driver check, from merged 4.7.1 ports (darkember, vertsky,
+## bitfall). No merged port on an older Godot runtime has it, so it goes in only
+## for 4.7+ until someone confirms older runtimes need it too. Goes after the
+## CONFDIR lines, followed by a blank line.
+const LIBMALI_CHECK := [
+	"if [[ \"$CFW_NAME\" = \"ROCKNIX\" ]]; then",
+	"    if ! glxinfo | grep \"OpenGL version string\"; then",
+	"    pm_message \"This Port does not support the libMali graphics driver. Switch to Panfrost to continue.\"",
+	"    sleep 5",
+	"    exit 1",
+	"    fi",
+	"fi",
+	"",
+]
+
+## PortMaster's Godot 4 launcher, from the merged supermazerobo port, plus the
+## pm_platform_helper call and the cd into GAMEDIR, and without the comment
+## above the header, as in newer ports (stacktris) and PortMaster's checker.
 ## Only GAMEDIR, godot_runtime, godot_executable, pck_filename and
-## gptk_filename are replaced.
+## gptk_filename are replaced; LIBMALI_CHECK goes in for 4.7+ runtimes.
 const LAUNCHER_TEMPLATE := [
 	"#!/bin/bash",
 	"",
-	"# PortMaster preamble",
 	"XDG_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}",
 	"if [ -d \"/opt/system/Tools/PortMaster/\" ]; then",
 	"  controlfolder=\"/opt/system/Tools/PortMaster\"",
@@ -138,7 +154,10 @@ const LAUNCHER_TEMPLATE := [
 	"fi",
 	"$ESUDO mount \"$controlfolder/libs/${godot_runtime}.squashfs\" \"${godot_dir}\"",
 	"",
+	"cd \"$GAMEDIR\"",
+	"",
 	"$GPTOKEYB \"$godot_executable\" -c \"$GAMEDIR/$gptk_filename\" &",
+	"pm_platform_helper \"$godot_dir/$godot_executable\"",
 	"",
 	"# Start Westonpack and Godot",
 	"# Put CRUSTY_SHOW_CURSOR=1 after \"env\" if you need a mouse cursor",
@@ -612,7 +631,15 @@ func build(project_dir: String, s: Dictionary) -> bool:
 			for dir in [gamedata, game_dir, out_root]:
 				DirAccess.remove_absolute(dir)  # only succeeds while empty
 		return false
+	# After the export: in a fresh checkout, its import is what writes
+	# .godot/extension_list.cfg.
+	_check_gdextensions(project_dir)
 	_clean_old_output(out_root, game_dir, port)
+	# The folder changes from here on, so an earlier build's zip no longer
+	# matches it (a new one is written once this build succeeds).
+	var zip_path := out_root.get_base_dir().path_join(port + ".zip")
+	if FileAccess.file_exists(zip_path):
+		DirAccess.remove_absolute(zip_path)
 
 	# 3. Renderer override, next to the pck (loaded from the main pack's folder)
 	_write(gamedata.path_join("override.cfg"),
@@ -645,7 +672,7 @@ func build(project_dir: String, s: Dictionary) -> bool:
 	var cover := resolve_path(str(s.get("cover", "")), project_dir)
 	if not cover.is_empty():
 		_copy_image(cover, out_root, "cover", false)
-	_copy_licenses(resolve_path(str(s.get("licenses", "")), project_dir), game_dir.path_join("licenses"))
+	_copy_licenses(resolve_path(str(s.get("licenses", "")), project_dir), game_dir.path_join("licenses"), port)
 
 	# 7. Metadata
 	var genres := _genres(str(s.get("genres", "")))
@@ -656,6 +683,15 @@ func build(project_dir: String, s: Dictionary) -> bool:
 
 	# 8. Checks
 	run_checks(out_root, port, script_name)
+	# 9. A zip of the port for testers, next to its folder. PortMaster installs
+	# this layout: it moves README.md, port.json, gameinfo.xml and the
+	# screenshot from beside the launcher into the port folder.
+	if errors == 0:
+		if FileAccess.file_exists(out_root.get_base_dir().get_base_dir().path_join("tools/build_release.py")):
+			# Output is PortMaster-New's ports/: a zip there would end up in the PR.
+			_say("No %s written, since the output folder is PortMaster-New's ports folder. Zip the port folder's contents to share it with testers." % zip_path.get_file())
+		elif _write_zip(out_root, zip_path):
+			_say("Wrote %s for testers (install it from PortMaster's autoinstall folder)." % zip_path.get_file())
 	_say("== Done: %s" % out_root)
 	_say("   %d warning(s), %d error(s)." % [warnings, errors])
 	if errors == 0:
@@ -665,6 +701,73 @@ func build(project_dir: String, s: Dictionary) -> bool:
 		else:
 			_say("   Before submitting: %s." % ", ".join(submit_todo))
 	return errors == 0
+
+
+## Feature tags a .gdextension [libraries] key may use and still match
+## PortMaster's Godot runtime (a Linux ARM64 non-editor build).
+const HANDHELD_LIBRARY_TAGS := ["linux", "arm64", "64", "pc", "single", "release", "debug",
+	"template", "template_release", "template_debug"]
+
+
+## Warns about each GDExtension the game loads (.godot/extension_list.cfg): the
+## pck can't carry native libraries, and the plugin doesn't ship them beside it.
+func _check_gdextensions(project_dir: String) -> void:
+	var list := project_dir.path_join(".godot/extension_list.cfg")
+	if not FileAccess.file_exists(list):
+		return
+	for line in FileAccess.get_file_as_string(list).split("\n"):
+		var res := line.strip_edges()
+		if res.is_empty():
+			continue
+		var ext_name := res.get_file().get_basename()
+		if editor_only_extension(project_dir, res):
+			continue  # an editor tool; the game never loads it
+		var lib := arm64_library(project_dir, res)
+		if lib.is_empty():
+			_warn("The game uses the GDExtension '%s', which has no Linux ARM64 library, so it can't load on a handheld. Remove it from the game, or get a Linux ARM64 build of it." % ext_name)
+		else:
+			_warn("The game uses the GDExtension '%s'. Its Linux ARM64 library (%s) isn't copied into the port yet, so it won't load on the device. PortMaster-New's riseofthepenguinsgb port shows how to ship one by hand." % [ext_name, lib])
+
+
+## True when every library a .gdextension (`res` path) lists is for the editor,
+## so an exported game never loads it.
+static func editor_only_extension(project_dir: String, res: String) -> bool:
+	var cf := ConfigFile.new()
+	if cf.load(project_dir.path_join(res.trim_prefix("res://"))) != OK or not cf.has_section("libraries"):
+		return false
+	var keys := cf.get_section_keys("libraries")
+	for key in keys:
+		if not str(key).split(".").has("editor"):
+			return false
+	return not keys.is_empty()
+
+
+## The Linux ARM64 library a .gdextension (`res` path) would load on PortMaster's
+## runtime, as a res:// path; "" when it has none, or the file is missing or isn't
+## an ARM64 ELF library.
+static func arm64_library(project_dir: String, res: String) -> String:
+	var cf := ConfigFile.new()
+	if cf.load(project_dir.path_join(res.trim_prefix("res://"))) != OK or not cf.has_section("libraries"):
+		return ""
+	for key in cf.get_section_keys("libraries"):
+		var tags: PackedStringArray = str(key).split(".")
+		var fits := tags.has("linux")
+		for t in tags:
+			fits = fits and HANDHELD_LIBRARY_TAGS.has(t)
+		if not fits:
+			continue
+		var lib := str(cf.get_value("libraries", key))
+		if not lib.begins_with("res://"):
+			lib = res.get_base_dir().path_join(lib)
+		var f := FileAccess.open(project_dir.path_join(lib.trim_prefix("res://")), FileAccess.READ)
+		if f == null:
+			continue
+		var head := f.get_buffer(20)
+		# ELF, 64-bit, e_machine 183 (AArch64).
+		if head.size() == 20 and head.slice(0, 5) == PackedByteArray([0x7F, 0x45, 0x4C, 0x46, 2]) \
+				and head[18] == 183 and head[19] == 0:
+			return lib
+	return ""
 
 
 ## Chooses the PortMaster Godot runtime for an editor version.
@@ -1192,6 +1295,13 @@ func launcher_text(port: String, ver: String) -> String:
 			hits += 1
 	if hits != swaps.size():
 		return ""
+	var v := ver.split(".")
+	if int(v[0]) * 100 + int(v[1] if v.size() > 1 else "0") >= 407:
+		var at := lines.find("$ESUDO mkdir -p \"${CONFDIR}\"")
+		if at == -1:
+			return ""
+		for i in LIBMALI_CHECK.size():
+			lines.insert(at + 2 + i, LIBMALI_CHECK[i])
 	return "\n".join(lines) + "\n"
 
 
@@ -1391,7 +1501,7 @@ static func _is_text(bytes: PackedByteArray) -> bool:
 	return not bytes.has(0) and bytes.get_string_from_utf8().to_utf8_buffer() == bytes
 
 
-func _copy_licenses(src: String, dest: String) -> void:
+func _copy_licenses(src: String, dest: String, port: String) -> void:
 	DirAccess.make_dir_recursive_absolute(dest)
 	var d := DirAccess.open(src) if not src.is_empty() else null
 	if d == null:
@@ -1425,6 +1535,15 @@ func _copy_licenses(src: String, dest: String) -> void:
 			misnamed.append(f)
 	if not misnamed.is_empty():
 		_warn("PortMaster asks for licences named LICENSE.<component>.txt; rename %s." % ", ".join(misnamed))
+	# A ready-to-run port must also license the game itself, not just what it
+	# bundles: LICENSE.<port>.txt (or .md), the name PortMaster's checker asks for.
+	var has_game := false
+	for f in d.get_files():
+		var lower := f.to_lower()
+		if lower.begins_with("license.%s." % port.to_lower()) or lower == "license." + port.to_lower():
+			has_game = true
+	if not has_game:
+		_warn("No licence for the game itself. Add LICENSE.%s.txt to the licences folder with the game's licence, or the developer's permission to distribute it." % port)
 
 
 # ---------------------------------------------------------------- checks
@@ -1498,6 +1617,40 @@ static func _list_files(dir: String) -> PackedStringArray:
 
 
 # ---------------------------------------------------------------- helpers
+
+## Zips the contents of `src` (not the folder itself) into `zip_path`, via a
+## temporary file so a failed write leaves any previous zip as it was.
+func _write_zip(src: String, zip_path: String) -> bool:
+	var tmp := zip_path + ".tmp"
+	var zp := ZIPPacker.new()
+	var err := zp.open(tmp)
+	if err == OK:
+		for path in _list_files(src):
+			err = zp.start_file(path.trim_prefix(src + "/"))
+			if err != OK:
+				break
+			err = zp.write_file(FileAccess.get_file_as_bytes(path))
+			var closed := zp.close_file()
+			if err == OK:
+				err = closed
+			if err != OK:
+				break
+		# close() writes the zip's central directory: a failure there leaves
+		# a broken zip, so it counts too.
+		var finished := zp.close()
+		if err == OK:
+			err = finished
+	if err == OK:
+		if FileAccess.file_exists(zip_path):
+			DirAccess.remove_absolute(zip_path)
+		err = DirAccess.rename_absolute(tmp, zip_path)
+	if err != OK:
+		if FileAccess.file_exists(tmp):
+			DirAccess.remove_absolute(tmp)
+		_warn("Couldn't write %s (%s). Zip the port folder's contents yourself to share it." % [zip_path, error_string(err)])
+		return false
+	return true
+
 
 func _write(path: String, text: String) -> void:
 	DirAccess.make_dir_recursive_absolute(path.get_base_dir())
